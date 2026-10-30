@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.models import InsurancePolicy, PolicyRule, PolicyRuleExecution, Claim, Modification, OwnerDeclaration
 from app.database import SessionLocal
+from app.services.formatting import format_money
 
 logger = logging.getLogger(__name__)
 
@@ -136,21 +137,21 @@ def extract_policy_terms_from_text(raw_text: str) -> Dict[str, Any]:
         extracted["expiry_date"] = exp_match.group(1).strip()
 
     # 4. Coverage Limits
-    dwelling_match = re.search(r"(?:Coverage\s*A|Dwelling(?:\s*Limit)?)\s*:?\s*\$?([0-9,]+)", raw_text, re.IGNORECASE)
+    dwelling_match = re.search(r"(?:Coverage\s*A|Dwelling(?:\s*Limit)?)\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
     if dwelling_match:
         try:
             extracted["coverage_limits"]["dwelling"] = float(dwelling_match.group(1).replace(",", ""))
         except ValueError:
             pass
 
-    personal_prop_match = re.search(r"(?:Coverage\s*C|Personal\s*Property)\s*:?\s*\$?([0-9,]+)", raw_text, re.IGNORECASE)
+    personal_prop_match = re.search(r"(?:Coverage\s*C|Personal\s*Property)\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
     if personal_prop_match:
         try:
             extracted["coverage_limits"]["personal_property"] = float(personal_prop_match.group(1).replace(",", ""))
         except ValueError:
             pass
 
-    other_struct_match = re.search(r"(?:Coverage\s*B|Other\s*Structures)\s*:?\s*\$?([0-9,]+)", raw_text, re.IGNORECASE)
+    other_struct_match = re.search(r"(?:Coverage\s*B|Other\s*Structures)\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
     if other_struct_match:
         try:
             extracted["coverage_limits"]["other_structures"] = float(other_struct_match.group(1).replace(",", ""))
@@ -158,14 +159,14 @@ def extract_policy_terms_from_text(raw_text: str) -> Dict[str, Any]:
             pass
 
     # 5. Deductibles
-    std_ded_match = re.search(r"(?:Standard|All\s*Perils?|Policy)\s*Deductible\s*:?\s*\$?([0-9,]+)", raw_text, re.IGNORECASE)
+    std_ded_match = re.search(r"(?:Standard|All\s*Perils?|Policy)\s*Deductible\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
     if std_ded_match:
         try:
             extracted["deductibles"]["standard"] = float(std_ded_match.group(1).replace(",", ""))
         except ValueError:
             pass
 
-    wind_ded_match = re.search(r"(?:Wind(?:storm)?(?:\s*/\s*Hail)?)\s*Deductible\s*:?\s*\$?([0-9,]+)", raw_text, re.IGNORECASE)
+    wind_ded_match = re.search(r"(?:Wind(?:storm)?(?:\s*/\s*Hail)?)\s*Deductible\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
     if wind_ded_match:
         try:
             extracted["deductibles"]["wind_hail"] = float(wind_ded_match.group(1).replace(",", ""))
@@ -324,7 +325,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "PASS",
-                "explanation": f"Claimed amount (${amt:,.2f}) is within the verified dwelling limit (${dwelling_limit:,.2f}).",
+                "explanation": f"Claimed amount ({format_money(amt)}) is within the verified dwelling limit ({format_money(dwelling_limit)}).",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -333,7 +334,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "ALERT_CREATED",
-                "explanation": f"Claimed amount (${amt:,.2f}) exceeds policy dwelling limit (${dwelling_limit:,.2f}) by ${amt - dwelling_limit:,.2f}. Provisional payout must be capped.",
+                "explanation": f"Claimed amount ({format_money(amt)}) exceeds policy dwelling limit ({format_money(dwelling_limit)}) by {format_money(amt - dwelling_limit)}. Provisional payout must be capped.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -387,7 +388,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "INCONCLUSIVE",
-                "explanation": f"Applicable deductible determined as ${applicable_ded:,.2f} ({ded_type}), but loss amount is missing.",
+                "explanation": f"Applicable deductible determined as {format_money(applicable_ded)} ({ded_type}), but loss amount is missing.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -397,7 +398,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "ALERT_CREATED",
-                "explanation": f"Claimed loss (${amt:,.2f}) is below or equal to the applicable {ded_type} (${applicable_ded:,.2f}). No net provisional payment.",
+                "explanation": f"Claimed loss ({format_money(amt)}) is below or equal to the applicable {ded_type} ({format_money(applicable_ded)}). No net provisional payment.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -406,7 +407,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "PASS",
-                "explanation": f"Claimed loss (${amt:,.2f}) exceeds {ded_type} (${applicable_ded:,.2f}). Net provisional loss base: ${amt - applicable_ded:,.2f}.",
+                "explanation": f"Claimed loss ({format_money(amt)}) exceeds {ded_type} ({format_money(applicable_ded)}). Net provisional loss base: {format_money(amt - applicable_ded)}.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
