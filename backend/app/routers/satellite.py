@@ -7,7 +7,10 @@ from sqlalchemy import desc
 from app.database import get_db
 from app.models import Property, PropertySnapshot, AuditLog, User
 from app.schemas import SatelliteSearchResultItem, SatelliteRetrieveRequest, PropertySnapshotOut
-from app.services.satellite_service import satellite_service
+from app.config import settings
+from app.services.satellite_service import (
+    satellite_service, SatelliteUnavailableError, SatelliteProviderError, ORIGIN_DEMO
+)
 from app.auth import get_current_user
 
 router = APIRouter(prefix="/satellite", tags=["Satellite Monitoring"])
@@ -46,14 +49,21 @@ def search_satellite_imagery(
     except ValueError:
         raise HTTPException(status_code=400, detail="Dates must be in YYYY-MM-DD format.")
 
-    results = satellite_service.search_imagery(
-        latitude=lat,
-        longitude=lon,
-        start_date=start_date,
-        end_date=end_date,
-        max_cloud_cover=max_cloud_cover
-    )
-    return results
+    try:
+        return satellite_service.search_imagery(
+            latitude=lat, longitude=lon, start_date=start_date, end_date=end_date,
+            max_cloud_cover=max_cloud_cover
+        )
+    except SatelliteUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except SatelliteProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/status")
+def satellite_status(current_user: User = Depends(get_current_user)):
+    """Which satellite provider is actually usable right now (no secrets exposed)."""
+    return satellite_service.status()
 
 @router.post("/retrieve", response_model=PropertySnapshotOut)
 def retrieve_satellite_snapshot(
@@ -92,24 +102,25 @@ def retrieve_satellite_snapshot(
         PropertySnapshot.is_baseline == True
     ).first()
 
+    # The feature hint only affects DEMO synthetic tiles; real imagery is never altered.
     feature_hint = "baseline"
-    if has_baseline and not req.is_baseline:
-        # For demo purposes, pick a modification feature if newer date
-        if "solar" in prop.property_reference.lower() or "solar" in prop.address.lower() or prop.id % 3 == 0:
-            feature_hint = "solar"
-        elif "pool" in prop.property_reference.lower() or "pool" in prop.address.lower() or prop.id % 3 == 1:
-            feature_hint = "pool"
-        else:
-            feature_hint = "extension"
+    if has_baseline and not req.is_baseline and settings.DEMO_MODE:
+        feature_hint = ("solar", "pool", "extension")[prop.id % 3]
 
-    retrieval_res = satellite_service.retrieve_imagery(
-        catalog_id=req.catalog_id,
-        acquisition_date=req.acquisition_date,
-        satellite_name=req.satellite_name,
-        latitude=prop.latitude,
-        longitude=prop.longitude,
-        feature_hint=feature_hint
-    )
+    try:
+        retrieval_res = satellite_service.retrieve_imagery(
+            catalog_id=req.catalog_id,
+            acquisition_date=req.acquisition_date,
+            satellite_name=req.satellite_name,
+            latitude=prop.latitude,
+            longitude=prop.longitude,
+            feature_hint=feature_hint,
+            cloud_coverage=req.cloud_coverage,
+        )
+    except SatelliteUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except SatelliteProviderError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
     snapshot = PropertySnapshot(
         property_id=prop.id,
@@ -118,6 +129,7 @@ def retrieve_satellite_snapshot(
         acquisition_date=retrieval_res["acquisition_date"],
         cloud_coverage=req.cloud_coverage or retrieval_res["cloud_coverage"],
         is_baseline=req.is_baseline,
+        data_origin=retrieval_res["data_origin"],
         capture_metadata=retrieval_res["capture_metadata"]
     )
     db.add(snapshot)
@@ -140,7 +152,8 @@ def retrieve_satellite_snapshot(
             "property_id": prop.id,
             "acquisition_date": req.acquisition_date,
             "satellite": req.satellite_name,
-            "is_baseline": snapshot.is_baseline
+            "is_baseline": snapshot.is_baseline,
+            "data_origin": snapshot.data_origin
         },
         notes=f"Retrieved satellite tile {req.catalog_id} by {current_user.name}"
     )
