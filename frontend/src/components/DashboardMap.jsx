@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
+import { INDIA_CENTER, INDIA_ZOOM } from '../utils/format';
 import {
   MapPin,
   Satellite,
@@ -29,15 +30,15 @@ const DashboardMap = ({ properties = [] }) => {
       (p) => typeof p.latitude === 'number' && typeof p.longitude === 'number' && !isNaN(p.latitude) && !isNaN(p.longitude)
     );
 
-    // Initial center (default Atlanta or first property)
-    const initialLat = validProps.length > 0 ? validProps[0].latitude : 33.7749;
-    const initialLon = validProps.length > 0 ? validProps[0].longitude : -84.3541;
+    // Initial view: whole of India unless properties exist (fitted below)
+    const initialLat = INDIA_CENTER[0];
+    const initialLon = INDIA_CENTER[1];
 
     if (!mapInstanceRef.current) {
       const map = L.map(mapContainerRef.current, {
         scrollWheelZoom: true,
         zoomControl: true,
-      }).setView([initialLat, initialLon], 6);
+      }).setView([initialLat, initialLon], INDIA_ZOOM);
 
       // OpenStreetMap Tiles with Attribution
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -69,7 +70,7 @@ const DashboardMap = ({ properties = [] }) => {
           ${prop.address}
         </div>
         <div style="font-size: 0.75rem; color: #64748b; margin-bottom: 8px;">
-          ${prop.city ? prop.city + ', ' : ''}${prop.state || ''} ${prop.postal_code || ''}
+          ${prop.city ? prop.city + ', ' : ''}${prop.state || ''} ${prop.postal_code ? '- ' + prop.postal_code : ''}${prop.is_demo ? ' <b style="color:#b45309">(DEMO record)</b>' : ''}
         </div>
         <div style="font-size: 0.74rem; background: #f1f5f9; padding: 4px 6px; border-radius: 4px; margin-bottom: 8px;">
           <b>Owner:</b> ${prop.owner_name}<br/>

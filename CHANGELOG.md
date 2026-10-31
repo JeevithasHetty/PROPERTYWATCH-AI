@@ -1,5 +1,17 @@
 # Changelog
 
+## India localisation, live satellite, real model runners (latest)
+- **Fixed blockers:** backend did not start (`scipy` missing from requirements); `settings.ROOT_DIR` AttributeError broke damage assessment and both model endpoints; seed crashed (`props` undefined) so policies/claims were never seeded.
+- India: Nominatim restricted to `countrycodes=in`, no fabricated Atlanta fallback, Indian demo data, INR (lakh/crore) everywhere, India-centred Leaflet maps (fixed init/cleanup/resize/stale-callback bugs).
+- Satellite: real Copernicus (OAuth + Catalog + Process API) and Google Earth Engine (service account) providers; synthetic tiles only in DEMO_MODE, watermarked and flagged `data_origin`; removed hard-coded personal GEE project IDs; truthful status page with live probe.
+- AI: ONNX Runtime runners for building change and rooftop objects; availability reflects real weights; dead simulated code removed.
+- Rules: 8 new rules (15 total); structured policy terms; PDF clause extraction with human verification.
+- Claims: guarded decisions, settlement endpoint, no reviewer shortcut to outcome statuses, sub-limits and average clause in the calculation.
+- Monitoring: scheduler, comparison with previous imagery, alerts, notifications (+optional SMTP).
+- Tests: 29 backend tests (`cd backend && python -m pytest`).
+
+# Changelog
+
 ## Unreleased
 
 ### Implemented

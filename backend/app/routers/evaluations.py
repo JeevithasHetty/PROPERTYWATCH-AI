@@ -16,6 +16,8 @@ from app.schemas import (
 )
 from app.auth import get_current_user, require_roles
 from app.services.ai_models_service import levir_cd_detector
+from app.services.paths import snapshot_fs_path
+from app.services.policy_rules_engine import run_policy_rules_pipeline, underinsurance_factor
 
 router = APIRouter(prefix="/claims", tags=["Damage Evaluation & Calculations"])
 logger = logging.getLogger(__name__)
@@ -52,8 +54,8 @@ def create_or_update_damage_assessment(
     ai_conf = None
 
     if pre_snap and post_snap:
-        base_path = str(settings.ROOT_DIR / pre_snap.image_path.lstrip("/")) if pre_snap.image_path.startswith("/") else pre_snap.image_path
-        comp_path = str(settings.ROOT_DIR / post_snap.image_path.lstrip("/")) if post_snap.image_path.startswith("/") else post_snap.image_path
+        base_path = str(snapshot_fs_path(pre_snap))
+        comp_path = str(snapshot_fs_path(post_snap))
 
         # Run LEVIR-CD building change detector
         det_res = levir_cd_detector.detect_building_changes(base_path, comp_path, claim.property_id)
@@ -67,6 +69,9 @@ def create_or_update_damage_assessment(
                 "limitations": det_res.get("limitations")
             }
             ai_conf = det_res.get("confidence")
+            ai_model_name = f"{det_res.get('model_key')} {det_res.get('model_version')}"
+        else:
+            ai_suggestions = {"status": det_res.get("status"), "limitations": det_res.get("limitations")}
 
     # Missing evidence check
     missing_evidence = req.missing_evidence_flags or []
@@ -163,8 +168,12 @@ def calculate_provisional_payout(
         raise HTTPException(status_code=400, detail="The request claim ID must match the claim in the URL.")
     if not policy.terms_verified:
         raise HTTPException(status_code=409, detail="Policy terms must be verified before calculating a provisional amount.")
-    if not policy.coverage_limits or req.limit_category not in policy.coverage_limits:
-        raise HTTPException(status_code=409, detail="The requested coverage limit is missing from the verified policy terms.")
+    sub_limits = (policy.structured_terms or {}).get("sub_limits") or {}
+    limits_pool = {**(policy.coverage_limits or {}), **sub_limits}
+    if req.limit_category not in limits_pool:
+        raise HTTPException(status_code=409, detail="The requested coverage limit or sub-limit is missing from the verified policy terms.")
+    if not claim.damage_assessment:
+        raise HTTPException(status_code=409, detail="Record the damage assessment before calculating a provisional payout.")
     if not policy.deductibles or req.deductible_type_applied not in policy.deductibles:
         raise HTTPException(status_code=409, detail="The requested deductible is missing from the verified policy terms.")
     if req.damage_assessment_id:
@@ -181,12 +190,21 @@ def calculate_provisional_payout(
     # Net = max(0.0, min(Gross - Excluded, Limit) - Deductible)
     gross = req.gross_claimed_loss
     excluded = req.non_covered_excluded_amount
-    limit = float(policy.coverage_limits[req.limit_category])
+    limit = float(limits_pool[req.limit_category])
     deductible = float(policy.deductibles[req.deductible_type_applied])
 
+    # Evaluate all policy rules for this claim first so the calculation rests on recorded rule outcomes.
+    executions = run_policy_rules_pipeline(db=db, policy_id=policy.id, claim_id=claim.id,
+                                           custom_inputs={"claimed_amount": gross})
     subtotal_covered = max(0.0, gross - excluded)
+    factor = underinsurance_factor(policy)
+    if factor is not None:  # verified average clause + verified underinsurance
+        subtotal_covered *= factor
     capped_loss = min(subtotal_covered, limit)
     net_payout = max(0.0, capped_loss - deductible)
+    flagged = [e.rule_code for e in executions if e.result in ("ALERT_CREATED", "MORE_EVIDENCE_REQUIRED", "PENDING_REVIEW")]
+    extra = (f" Average clause factor {factor:.4f} applied." if factor is not None else "") + \
+            (f" Rules needing human attention: {', '.join(flagged)}." if flagged else "")
 
     calc = ProvisionalCalculation(
         claim_id=claim.id,
@@ -199,7 +217,7 @@ def calculate_provisional_payout(
         deductible_type_applied=req.deductible_type_applied,
         provisional_net_payout=net_payout,
         calculation_method=req.calculation_method,
-        assumptions=req.assumptions,
+        assumptions=((req.assumptions or "") + extra).strip(),
         is_provisional=True,
         calculated_by_user_id=current_user.id,
         created_at=datetime.datetime.utcnow()

@@ -2,11 +2,13 @@ import datetime
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 
+from app.services.format_utils import format_inr
 from app.database import get_db
 from app.models import (
     Claim, ClaimRecommendation, ClaimDecision, ClaimStatusHistory,
-    Notification, User, AuditLog
+    Notification, User, AuditLog, ClaimSettlement
 )
 from app.schemas import (
     ClaimRecommendationCreate, ClaimRecommendationOut,
@@ -120,6 +122,29 @@ def submit_authorized_decision(
     if not claim:
         raise HTTPException(status_code=404, detail="Claim not found")
 
+    if claim.status in ("Settled", "Closed"):
+        raise HTTPException(status_code=409, detail=f"Claim is {claim.status}; no further decisions can be recorded.")
+    if req.decision in ("APPROVED", "APPROVED_PARTIAL"):
+        if not claim.calculations:
+            raise HTTPException(status_code=409, detail="A provisional calculation is required before approval.")
+        if not claim.recommendations:
+            raise HTTPException(status_code=409, detail="A reviewer recommendation is required before approval.")
+        latest_calc = max(claim.calculations, key=lambda c: c.id)
+        if req.authorized_amount is None or req.authorized_amount < 0:
+            raise HTTPException(status_code=400, detail="authorized_amount is required for approval.")
+        if req.authorized_amount > latest_calc.provisional_net_payout + 0.005:
+            raise HTTPException(status_code=409, detail=(
+                f"Authorized amount {format_inr(req.authorized_amount)} exceeds the latest provisional payout "
+                f"{format_inr(latest_calc.provisional_net_payout)}. Record a new calculation first."))
+    if req.decision == "DENIED":
+        # A denial must rest on cited, verified policy terms - never on a satellite/rule signal or a modification alone.
+        if not req.applicable_policy_clauses:
+            raise HTTPException(status_code=400, detail="A denial must cite the applicable policy clause(s).")
+        if not claim.policy or not claim.policy.terms_verified:
+            raise HTTPException(status_code=409, detail="A claim cannot be denied on unverified policy terms.")
+        if len((req.rationale or "").strip()) < 20:
+            raise HTTPException(status_code=400, detail="A denial requires a substantive written rationale.")
+
     decision_version = len(claim.decisions) + 1
 
     dec = ClaimDecision(
@@ -178,7 +203,7 @@ def submit_authorized_decision(
         user_id=claim.user_id,
         title=f"Claim Determination: {claim.claim_reference}",
         message=f"Official determination recorded: {req.decision}. " +
-                (f"Authorized Amount: ${req.authorized_amount:,.2f}. " if req.authorized_amount else "") +
+                (f"Authorized Amount: {format_inr(req.authorized_amount)}. " if req.authorized_amount else "") +
                 f"Rationale: {req.rationale}",
         type="CLAIM_STATUS_UPDATE",
         link=f"/claims/{claim.id}",
@@ -192,3 +217,63 @@ def submit_authorized_decision(
     dec_out = ClaimDecisionOut.model_validate(dec)
     dec_out.decision_maker_name = current_user.name
     return dec_out
+
+
+class SettlementCreate(BaseModel):
+    settled_amount: float = Field(..., ge=0)
+    payment_mode: str
+    payment_reference: str = Field(..., min_length=3)
+    payment_date: Optional[datetime.datetime] = None
+    notes: Optional[str] = None
+
+
+@router.post("/{claim_id}/settlement", status_code=status.HTTP_201_CREATED)
+def record_settlement(
+    claim_id: int,
+    req: SettlementCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin", "decision_maker"]))
+):
+    """Record payment of an APPROVED claim (amount cannot exceed the authorised amount). Moves claim to 'Settled'."""
+    claim = db.query(Claim).filter(Claim.id == claim_id).first()
+    if not claim:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    if claim.status not in ("Approved", "Partially Approved"):
+        raise HTTPException(status_code=409, detail="Only an approved claim can be settled.")
+    if req.payment_mode.upper() not in {"NEFT", "RTGS", "UPI", "IMPS", "CHEQUE"}:
+        raise HTTPException(status_code=400, detail="payment_mode must be one of NEFT, RTGS, UPI, IMPS, CHEQUE.")
+    last = max((d for d in claim.decisions if d.decision in ("APPROVED", "APPROVED_PARTIAL")),
+               key=lambda d: d.decision_version, default=None)
+    if last is None:
+        raise HTTPException(status_code=409, detail="No approving decision found.")
+    paid = sum(x.settled_amount for x in db.query(ClaimSettlement).filter(ClaimSettlement.claim_id == claim.id))
+    if paid + req.settled_amount > (last.authorized_amount or 0) + 0.005:
+        raise HTTPException(status_code=409, detail=(
+            f"Settlement would exceed the authorised amount {format_inr(last.authorized_amount)} "
+            f"(already paid {format_inr(paid)})."))
+    st = ClaimSettlement(claim_id=claim.id, decision_id=last.id, settled_amount=req.settled_amount,
+                         payment_mode=req.payment_mode.upper(), payment_reference=req.payment_reference,
+                         payment_date=req.payment_date or datetime.datetime.utcnow(),
+                         settled_by_user_id=current_user.id, notes=req.notes)
+    db.add(st)
+    prev = claim.status
+    fully_paid = abs(paid + req.settled_amount - (last.authorized_amount or 0)) < 0.005
+    if fully_paid:
+        claim.status = "Settled"
+    claim.updated_at = datetime.datetime.utcnow()
+    db.add(ClaimStatusHistory(claim_id=claim.id, from_status=prev, to_status=claim.status,
+                              changed_by_user_id=current_user.id,
+                              notes=f"Payment {format_inr(req.settled_amount)} via {st.payment_mode} ref {st.payment_reference}",
+                              timestamp=datetime.datetime.utcnow()))
+    db.add(AuditLog(user_id=current_user.id, entity_type="Claim", entity_id=claim.claim_reference,
+                    action="CLAIM_SETTLEMENT_RECORDED",
+                    new_state={"amount": req.settled_amount, "mode": st.payment_mode, "reference": st.payment_reference},
+                    timestamp=datetime.datetime.utcnow()))
+    db.add(Notification(user_id=claim.user_id, title=f"Claim payment: {claim.claim_reference}",
+                        message=f"{format_inr(req.settled_amount)} paid via {st.payment_mode} (ref {st.payment_reference}).",
+                        type="CLAIM_STATUS_UPDATE", link=f"/claims/{claim.id}"))
+    db.commit()
+    db.refresh(st)
+    return {"id": st.id, "claim_id": claim.id, "settled_amount": st.settled_amount, "payment_mode": st.payment_mode,
+            "payment_reference": st.payment_reference, "payment_date": st.payment_date,
+            "claim_status": claim.status, "fully_settled": fully_paid}

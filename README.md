@@ -6,7 +6,7 @@
 [![React](https://img.shields.io/badge/Frontend-React%2019-61DAFB.svg?style=flat&logo=react)](https://react.dev)
 [![OpenCV](https://img.shields.io/badge/Computer%20Vision-OpenCV-5C3EE8.svg?style=flat&logo=opencv)](https://opencv.org)
 [![SQLite](https://img.shields.io/badge/Database-SQLite%203-003B57.svg?style=flat&logo=sqlite)](https://sqlite.org)
-[![Tests](https://img.shields.io/badge/Tests-17%20Passed-10B981.svg?style=flat)]()
+[![Tests](https://img.shields.io/badge/Tests-29%20Passed-10B981.svg?style=flat)]()
 
 ---
 
@@ -202,7 +202,11 @@ FastAPI provides interactive OpenAPI Swagger documentation at **[http://127.0.0.
 - `POST /api/properties/{property_id}/baseline-photo` — Upload ground baseline photo
 - `GET /api/properties/{property_id}/snapshots/{snapshot_id}/image` — Download a private owner-uploaded baseline photo after property access checks
 
-### Satellite Feeds (Copernicus & Sentinel Hub)
+### Satellite Feeds (Copernicus / Google Earth Engine)
+- `GET /api/satellite/status` - which provider is usable
+- `GET /api/monitoring/status`, `POST /api/monitoring/run`, `GET /api/monitoring/runs` - automated monitoring
+- `POST /api/policies/{id}/clauses/extract`, `GET/PUT /api/policies/{id}/clauses[/{cid}]`, `POST /api/policies/{id}/clauses/apply` - clause review
+- `POST /api/claims/{id}/settlement` - record payment
 - `GET /api/satellite/search` — Search Sentinel-2 optical passes by coordinates and date range
 - `POST /api/satellite/retrieve` — Acquire and store satellite tile (prevents duplicates)
 - `GET /api/satellite/properties/{property_id}/snapshots` — List all snapshots for a property
@@ -259,31 +263,42 @@ The React **Insurance Claims** page provides claim registration, evidence submis
 
 ## 8. Demo Mode vs Live Mode
 
-PropertyWatch AI defaults to **Demo Mode**. Synthetic imagery and pre-seeded sample records are illustrative, not live satellite observations or verified real-world claims. The status and inference records identify configured providers and limitations. No paid provider is selected automatically.
+| | DEMO_MODE=true | DEMO_MODE=false (live) |
+| --- | --- | --- |
+| Users / properties | Seeded Indian sample records (flagged `is_demo`) | None. Optionally bootstrap one admin via `BOOTSTRAP_ADMIN_EMAIL/PASSWORD` |
+| Satellite images | Synthetic tiles, watermarked **DEMO SYNTHETIC**, `data_origin=DEMO_SYNTHETIC` | Real Sentinel-2 only (`data_origin=SATELLITE_LIVE`); HTTP 503 if no provider is configured |
+| Geocoding | Nominatim; offline Indian city-centre fallback labelled DEMO | Nominatim only; 404/502 on failure (no invented coordinates) |
+| Scheduled monitoring | Skipped unless `MONITORING_RUN_IN_DEMO=true` | Runs every `MONITORING_INTERVAL_HOURS` |
 
-### Configuring Live Mode:
-To connect to live Copernicus Data Space Ecosystem feeds:
-1. Register for an account at [dataspace.copernicus.eu](https://dataspace.copernicus.eu).
-2. Generate an OAuth2 Client ID and Client Secret.
-3. Edit `backend\.env`:
-   ```env
-   DEMO_MODE=false
-   SECRET_KEY=<a unique high-entropy secret>
-   CORS_ORIGINS=http://127.0.0.1:5173,http://localhost:5173
-   COPERNICUS_CLIENT_ID=your_client_id_here
-   COPERNICUS_CLIENT_SECRET=your_client_secret_here
-   ```
-4. Restart the backend. The Settings page (`/settings`) will automatically show the live feed status!
+### Live satellite setup
+1. **Copernicus Data Space (recommended, free):** create an account at dataspace.copernicus.eu, then Dashboard > OAuth clients > create client. Put the id/secret in `COPERNICUS_CLIENT_ID` / `COPERNICUS_CLIENT_SECRET`. The app authenticates with OAuth2 client-credentials, searches the Sentinel Hub Catalog (`sentinel-2-l2a`, cloud filter) and downloads a true-colour tile with the Process API.
+2. **Google Earth Engine (optional):** `pip install earthengine-api`, register a Cloud project for Earth Engine, create a service account + JSON key, and set `GEE_PROJECT_ID`, `GEE_SERVICE_ACCOUNT_EMAIL`, `GEE_SERVICE_ACCOUNT_KEY`.
+3. `GET /api/settings/status?probe=true` (Settings page) tests authentication for real.
 
----
+**Resolution limit:** Sentinel-2 is 10 m/pixel. It shows footprint-scale change only; it cannot show rooftop solar panels, small extensions or interior changes. For those you need sub-metre imagery (commercial providers, drone/aerial surveys) uploaded as snapshots.
+
+### Trained AI models (not bundled)
+No weights ship with this repository, so both detectors report `UNAVAILABLE` until you supply them.
+* **Building change** - ONNX export of a change-detection network trained on LEVIR-CD (FC-Siam, BIT, ChangeFormer...). Two inputs `[1,3,H,W]` (or one 6-channel input), output change logits `[1,1,H,W]` or `[1,2,H,W]`. Set `LEVIR_CD_MODEL_PATH` or place `models/levir_cd.onnx`.
+* **Rooftop objects** - Ultralytics YOLO ONNX export, class names in `ROOFTOP_MODEL_CLASSES`. Set `ROOFTOP_MODEL_PATH` or place `models/rooftop_yolo.onnx`.
+Availability is verified by actually loading the file with ONNX Runtime at startup and on every call. These models are trained on <=1 m imagery, so on 10 m Sentinel-2 tiles their output is of limited value. OpenCV differencing remains the supporting analysis.
+
+### Policy documents
+`POST /api/policies/{id}/document` (PDF) extracts text (pypdf/pdfplumber; OCR if tesseract is installed) and identifies clauses (sum insured, deductible/excess, insured perils, exclusions, sub-limits, usage, conditions, endorsements; INR, lakh/crore aware). Clauses start as **Extracted**; a reviewer verifies/corrects each (`PUT /api/policies/{id}/clauses/{cid}`) and then applies them (`POST .../clauses/apply`), which creates a new policy version. Rules only use verified terms.
+
+### Claim workflow
+submission -> evidence -> review (`Under Evaluation`) -> damage assessment -> policy-rule evaluation -> provisional payout -> recommendation -> decision (decision-maker/admin only; approval needs a calculation + recommendation and cannot exceed the payout; denial needs cited clauses and verified terms) -> settlement (`POST /api/claims/{id}/settlement`: NEFT/RTGS/UPI/IMPS/cheque + reference). Reviewers cannot set outcome statuses directly.
+
+### Automated monitoring
+APScheduler runs `monitoring_service.run_monitoring_cycle` every `MONITORING_INTERVAL_HOURS`: find newer cloud-filtered passes, download, compare with the previous snapshot (OpenCV), and if the change score >= `MONITORING_ALERT_CHANGE_SCORE` create a `New` modification alert plus in-app notifications (owner, reviewers, admins) and optional SMTP e-mail. Manual trigger: `POST /api/monitoring/run`; history: `GET /api/monitoring/runs`.
 
 ## 9. Troubleshooting & FAQ
 
 - **Database preservation:** The SQLite database is `backend\app\propertywatch.db`. Do not delete it to resolve setup problems. Back it up before upgrades; startup creates missing tables and applies only additive schema changes.
 - **Port conflicts:** If port `8000` or `5173` is occupied on your system, adjust the `--port` flag in `run_backend.bat` or `run_frontend.bat`.
 - **File Upload Limits:** Policy and claim documents support PDF, JPG, PNG, and WEBP. Modification evidence also supports TIFF. Uploads are limited to 25 MB and stored outside public static mounts.
-- **Model availability:** No trained LEVIR-CD building-change or rooftop-object weights are bundled/configured. Those inference endpoints return `UNAVAILABLE`; OpenCV visual differencing remains available and is not a trained-model result.
-- **Policy extraction:** PDF/OCR extraction is not configured. Uploaded terms are not inferred from binary content; an authorized reviewer must verify the required fields against the original document.
+- **Model availability:** see section 8; without weights the detectors return `UNAVAILABLE`.
+- **Policy extraction:** extracted clauses are suggestions; a reviewer must verify them. Scanned PDFs need tesseract + poppler.
 - **Demo credentials:** Pre-seeded accounts are for local demonstration only. Replace credentials and configure a unique `SECRET_KEY` before deployment.
 
 ---

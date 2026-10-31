@@ -11,6 +11,7 @@ from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, KeepTogether, PageBreak, HRFlowable
 )
 
+from app.services.format_utils import format_inr
 from app.config import settings
 
 def generate_modification_pdf_report(
@@ -379,13 +380,13 @@ def generate_claim_pdf_report(
             Paragraph("<b>Policy Number:</b>", body_style),
             Paragraph(pol.get("policy_number", property_dict.get("reference_policy_number", "N/A")), body_style),
             Paragraph("<b>Gross Claimed Loss:</b>", body_style),
-            Paragraph(f"<b>${claim_dict.get('estimated_loss', 0.0):,.2f}</b>", body_style)
+            Paragraph(f"<b>{format_inr(claim_dict.get('estimated_loss', 0.0))}</b>", body_style)
         ],
         [
             Paragraph("<b>Dwelling Limit (Cov A):</b>", body_style),
-            Paragraph(f"${cov.get('dwelling', 0.0):,.2f}", body_style),
+            Paragraph(f"{format_inr(cov.get('dwelling', 0.0))}", body_style),
             Paragraph("<b>Applicable Deductible:</b>", body_style),
-            Paragraph(f"${ded.get('standard', 0.0):,.2f} (Std) / ${ded.get('wind_hail', 0.0):,.2f} (W/H)", body_style)
+            Paragraph(f"{format_inr(ded.get('standard', 0.0))} (Std) / {format_inr(ded.get('wind_hail', 0.0))} (W/H)", body_style)
         ]
     ]
     sum_table = Table(summary_data, colWidths=[120, 160, 120, 140])
@@ -464,19 +465,19 @@ def generate_claim_pdf_report(
         calc_rows = [
             [
                 Paragraph("<b>Gross Claimed Loss:</b>", body_style),
-                Paragraph(f"${c_item.get('gross_claimed_loss', 0.0):,.2f}", body_style),
+                Paragraph(f"{format_inr(c_item.get('gross_claimed_loss', 0.0))}", body_style),
                 Paragraph("<b>Non-Covered / Excluded Items:</b>", body_style),
-                Paragraph(f"-${c_item.get('non_covered_excluded_amount', 0.0):,.2f}", body_style)
+                Paragraph(f"-{format_inr(c_item.get('non_covered_excluded_amount', 0.0))}", body_style)
             ],
             [
                 Paragraph("<b>Coverage Limit Applied:</b>", body_style),
-                Paragraph(f"${c_item.get('applicable_coverage_limit', 0.0):,.2f}", body_style),
+                Paragraph(f"{format_inr(c_item.get('applicable_coverage_limit', 0.0))}", body_style),
                 Paragraph(f"<b>Deductible Applied ({c_item.get('deductible_type_applied', 'Std')}):</b>", body_style),
-                Paragraph(f"-${c_item.get('applicable_deductible', 0.0):,.2f}", body_style)
+                Paragraph(f"-{format_inr(c_item.get('applicable_deductible', 0.0))}", body_style)
             ],
             [
                 Paragraph("<b>Net Provisional Calculation:</b>", ParagraphStyle("NetHdr", parent=body_style, fontName="Helvetica-Bold", fontSize=10, textColor=colors.HexColor("#0369A1"))),
-                Paragraph(f"<b>${c_item.get('provisional_net_payout', 0.0):,.2f}</b>", ParagraphStyle("NetAmt", parent=body_style, fontName="Helvetica-Bold", fontSize=11, textColor=colors.HexColor("#0369A1"))),
+                Paragraph(f"<b>{format_inr(c_item.get('provisional_net_payout', 0.0))}</b>", ParagraphStyle("NetAmt", parent=body_style, fontName="Helvetica-Bold", fontSize=11, textColor=colors.HexColor("#0369A1"))),
                 Paragraph("<b>Calculation Method:</b>", body_style),
                 Paragraph(c_item.get("calculation_method", "Standard formula"), body_style)
             ]
@@ -508,8 +509,8 @@ def generate_claim_pdf_report(
             Paragraph(f"<b>Determination Rationale:</b> {dec_item.get('rationale', 'Awaiting decision-maker sign-off')}", body_style)
         ],
         [
-            Paragraph(f"<b>Recommended Amount:</b> ${rec_item.get('recommended_amount', 0.0):,.2f}" if rec_item.get('recommended_amount') else "Recommended: As Calculated", body_style),
-            Paragraph(f"<b>Authorized Payout:</b> ${dec_item.get('authorized_amount', 0.0):,.2f}" if dec_item.get('authorized_amount') else "Authorized: None / Pending", body_style)
+            Paragraph(f"<b>Recommended Amount:</b> {format_inr(rec_item.get('recommended_amount', 0.0))}" if rec_item.get('recommended_amount') else "Recommended: As Calculated", body_style),
+            Paragraph(f"<b>Authorized Payout:</b> {format_inr(dec_item.get('authorized_amount', 0.0))}" if dec_item.get('authorized_amount') else "Authorized: None / Pending", body_style)
         ]
     ]
     sign_table = Table(sign_rows, colWidths=[270, 270])

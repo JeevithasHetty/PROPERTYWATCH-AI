@@ -25,8 +25,8 @@ const PropertyRegistrationPage = () => {
     city: '',
     state: '',
     postal_code: '',
-    latitude: 33.7749,
-    longitude: -84.3541,
+    latitude: null,
+    longitude: null,
     property_type: 'Residential Single Family',
     number_of_floors: 1,
     built_up_area: '',
@@ -85,9 +85,14 @@ const PropertyRegistrationPage = () => {
       }));
       setMatchedAddress(data.display_name);
       setGeocodeSource(data.source);
-      setLocationConfirmed(true);
+      if (data.precision === 'approximate') {
+        setLocationConfirmed(false);
+        setError('Approximate location only (street/house number not found in OpenStreetMap). Click the map to place the pin on your building, then confirm.');
+      } else {
+        setLocationConfirmed(true);
+      }
     } catch (err) {
-      setError('Geocoding service was unable to locate this address. Please refine query or adjust map pin manually.');
+      setError((err.response?.data?.detail || 'Could not locate this address.') + ' You can also click the map to place the pin manually.');
     } finally {
       setGeocodingLoading(false);
     }
@@ -208,7 +213,7 @@ const PropertyRegistrationPage = () => {
                   value={formData.address}
                   onChange={handleInputChange}
                   className="input-field"
-                  placeholder="e.g. 1042 Highland Ave NE"
+                  placeholder="e.g. Flat 1204, Sea Breeze Apartments, Pali Hill, Bandra West"
                 />
                 <button
                   type="button"
@@ -233,13 +238,13 @@ const PropertyRegistrationPage = () => {
                 value={formData.city}
                 onChange={handleInputChange}
                 className="input-field"
-                placeholder="Atlanta"
+                placeholder="Mumbai"
               />
             </div>
 
             <div>
               <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '6px' }}>
-                State / Region
+                State / UT
               </label>
               <input
                 type="text"
@@ -247,13 +252,13 @@ const PropertyRegistrationPage = () => {
                 value={formData.state}
                 onChange={handleInputChange}
                 className="input-field"
-                placeholder="Georgia"
+                placeholder="Maharashtra"
               />
             </div>
 
             <div>
               <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '6px' }}>
-                Postal Code
+                PIN code
               </label>
               <input
                 type="text"
@@ -261,7 +266,7 @@ const PropertyRegistrationPage = () => {
                 value={formData.postal_code}
                 onChange={handleInputChange}
                 className="input-field"
-                placeholder="30306"
+                placeholder="400050"
               />
             </div>
           </div>
@@ -287,13 +292,13 @@ const PropertyRegistrationPage = () => {
                   <div>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Latitude:</span>
                     <div className="font-mono" style={{ fontSize: '1.05rem', fontWeight: 700, color: '#6ee7a8' }}>
-                      {formData.latitude.toFixed(6)}° N
+                      {formData.latitude != null ? `${formData.latitude.toFixed(6)}° N` : 'Not set'}
                     </div>
                   </div>
                   <div>
                     <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)' }}>Longitude:</span>
                     <div className="font-mono" style={{ fontSize: '1.05rem', fontWeight: 700, color: '#6ee7a8' }}>
-                      {formData.longitude.toFixed(6)}° E
+                      {formData.longitude != null ? `${formData.longitude.toFixed(6)}° E` : 'Not set'}
                     </div>
                   </div>
                 </div>
@@ -327,6 +332,7 @@ const PropertyRegistrationPage = () => {
                   type="checkbox"
                   id="confirmLocationCheckbox"
                   checked={locationConfirmed}
+                  disabled={formData.latitude == null}
                   onChange={(e) => setLocationConfirmed(e.target.checked)}
                   style={{ width: '18px', height: '18px', cursor: 'pointer', accentColor: '#10b981' }}
                 />
@@ -357,7 +363,7 @@ const PropertyRegistrationPage = () => {
                 value={formData.owner_name}
                 onChange={handleInputChange}
                 className="input-field"
-                placeholder="e.g. David & Sarah Miller"
+                placeholder="e.g. Rohan & Meera Deshmukh"
               />
             </div>
 
@@ -434,7 +440,7 @@ const PropertyRegistrationPage = () => {
                 value={formData.reference_policy_number}
                 onChange={handleInputChange}
                 className="input-field"
-                placeholder="e.g. POL-GA-89210-V"
+                placeholder="e.g. POL-MH-89210-V"
               />
               <span style={{ fontSize: '0.72rem', color: 'var(--text-dim)', marginTop: '4px', display: 'block' }}>
                 This helps match your property to its policy. You can add the policy details later.

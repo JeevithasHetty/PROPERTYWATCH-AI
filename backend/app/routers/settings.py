@@ -1,5 +1,6 @@
 import datetime
-from fastapi import APIRouter, Depends
+import requests
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -7,12 +8,25 @@ from app.database import get_db
 from app.config import settings
 from app.schemas import ServiceStatusOut
 from app.auth import get_current_user, require_roles
-from app.models import User
+from app.models import User, PolicyRule, AIModelRegistry
+from app.services.satellite_service import satellite_service
+from app.services.monitoring_service import scheduler_status
+
+
+def _probe_nominatim() -> str:
+    try:
+        r = requests.get(settings.NOMINATIM_URL.replace('/search', '/status.php'), timeout=6,
+                         headers={'User-Agent': settings.NOMINATIM_USER_AGENT})
+        return 'ok' if r.status_code == 200 else f'HTTP {r.status_code}'
+    except requests.RequestException as exc:
+        return exc.__class__.__name__
+
 
 router = APIRouter(prefix="/settings", tags=["Settings & System Status"])
 
 @router.get("/status", response_model=ServiceStatusOut)
 def get_service_status(
+    probe: bool = Query(False, description="Actively test external services (slower)"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -29,27 +43,48 @@ def get_service_status(
     except Exception:
         db_ok = False
 
-    # 2. Geocoding Status (OpenStreetMap Nominatim)
+    # 2. Geocoding Status (OpenStreetMap Nominatim, India only)
     geocoding_status = {
         "provider": "OpenStreetMap Nominatim",
-        "status": "OPERATIONAL",
-        "rate_limit_compliance": "1 req/sec with polite User-Agent",
+        "status": "CONFIGURED",
+        "countrycodes": settings.DEFAULT_COUNTRY_CODE,
+        "rate_limit_compliance": "1 req/sec with identifying User-Agent",
+        "user_agent_is_default": "propertywatch.local" in settings.NOMINATIM_USER_AGENT,
         "caching_active": True,
-        "map_engine": "Leaflet with OpenStreetMap Tiles (&copy; OpenStreetMap contributors)",
-        "mode": "Live OSM API with Cache Fallback"
+        "map_engine": "Leaflet with OpenStreetMap tiles (c) OpenStreetMap contributors",
+        "mode": "Live OSM API" + (" (offline Indian city fallback in demo mode)" if settings.DEMO_MODE else ""),
+        "probe": None,
     }
+    if probe:
+        geocoding_status["probe"] = _probe_nominatim()
+        geocoding_status["status"] = "OPERATIONAL" if geocoding_status["probe"] == "ok" else "UNREACHABLE"
 
-    # 3. Satellite Service Status (Google Earth Engine)
+    # 3. Satellite status: reflects real credentials, never a hard-coded claim
+    sat = satellite_service.status()
+    if sat["active_provider"]:
+        sat_label = f"CONFIGURED ({sat['active_provider']})"
+    elif settings.DEMO_MODE:
+        sat_label = "DEMO ONLY (synthetic imagery; no live provider configured)"
+    else:
+        sat_label = "NOT CONFIGURED (live mode: retrieval disabled)"
     satellite_status = {
-        "provider": "Google Earth Engine (GEE) & Sentinel-2 MSI",
-        "status": f"CONFIGURED (Project: {settings.GEE_PROJECT_ID})",
-        "gee_project_id": settings.GEE_PROJECT_ID,
-        "gee_project_number": settings.GEE_PROJECT_NUMBER,
-        "gee_project_name": settings.GEE_PROJECT_NAME,
-        "dataset": "COPERNICUS/S2_SR_HARMONIZED (Harmonized Sentinel-2 Surface Reflectance)",
-        "resolution": "10 meters per pixel",
-        "earthengine_api": "Installed (earthengine-api)"
+        "provider": "Copernicus Data Space / Google Earth Engine (Sentinel-2)",
+        "status": sat_label,
+        "active_provider": sat["active_provider"],
+        "copernicus_configured": sat["copernicus_configured"],
+        "gee_configured": sat["gee_configured"],
+        "gee_missing": sat["gee_missing"],
+        "dataset": "sentinel-2-l2a / COPERNICUS/S2_SR_HARMONIZED",
+        "resolution": "10 m per pixel (small rooftop objects are not resolvable)",
+        "synthetic_imagery_possible": sat["synthetic_imagery_possible"],
+        "probe": None,
     }
+    if probe and sat["copernicus_configured"]:
+        try:
+            satellite_service.copernicus.token()
+            satellite_status["probe"] = "copernicus authentication ok"
+        except Exception as exc:  # noqa: BLE001
+            satellite_status["probe"] = f"copernicus authentication FAILED: {exc}"
 
     # 4. Deepfake Detection & Authenticity Forensics Status
     authenticity_status = {
@@ -72,24 +107,27 @@ def get_service_status(
         "purpose": "Evidence aggregation and chronological summaries only (no automated decisions)"
     }
 
-    # 6. Policy Rules Engine Status
+    # 6. Policy rules engine (counts come from the database)
+    active_rules = db.query(PolicyRule).filter(PolicyRule.is_active == True).count()  # noqa: E712
     policy_rules_status = {
-        "engine": "Configurable Insurance Policy Rules Engine",
+        "engine": "Deterministic policy rules engine",
         "status": "OPERATIONAL",
         "rules_catalogue": "docs/policy_rules_catalogue.md",
-        "active_rules_count": 7,
+        "active_rules_count": active_rules,
         "supported_outcomes": ["PASS", "ALERT_CREATED", "MORE_EVIDENCE_REQUIRED", "PENDING_REVIEW", "INCONCLUSIVE", "SYSTEM_ERROR"],
         "auto_approval_permitted": False,
-        "mode": "Deterministic Clause & Limit Verification"
+        "mode": "Verified-terms only; unverified terms yield PENDING_REVIEW",
     }
 
-    # 7. AI Models Registry Status
+    # 7. AI models: availability is read from the registry, which checks real weight files
+    models = db.query(AIModelRegistry).all()
     models_registry_status = {
-        "engine": "AI Model Registry & Inference Pipeline",
-        "status": "OPERATIONAL",
-        "registered_models": ["LEVIR-CD-Building-v2", "Rooftop-Solar-SmallObj-v1", "ELA-Forensic-v1", "Spectral-Diffusion-v1"],
-        "traceability": "Enabled (Model Version, Inputs, Scores, Limitations Recorded)",
-        "fabrication_policy": "Strict (Never synthesize predictions when model or source unavailable)"
+        "engine": "AI model registry (ONNX Runtime)",
+        "status": "OPERATIONAL" if all(m.is_available for m in models) else "PARTIAL",
+        "registered_models": [m.model_key for m in models],
+        "available_models": [m.model_key for m in models if m.is_available],
+        "unavailable_models": {m.model_key: m.provider for m in models if not m.is_available},
+        "fabrication_policy": "Strict (no prediction is generated when weights are missing)",
     }
 
     return {
@@ -104,6 +142,7 @@ def get_service_status(
             "type": "SQLite (Persistent)",
             "tables_initialized": table_count
         },
+        "monitoring": scheduler_status(),
         "demo_mode": settings.DEMO_MODE,
         "last_checked": datetime.datetime.utcnow()
     }

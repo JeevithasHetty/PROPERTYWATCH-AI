@@ -200,7 +200,7 @@ def run_image_comparison_pipeline(
         explanation = (
             f"Substantial structural change detected (score: {change_score}%). "
             f"Found {len(significant_contours)} prominent altered sector(s) encompassing {changed_percentage}% of property surface. "
-            f"High confidence signal for building footprint extension, new auxiliary building, or major structural addition."
+            f"Large visual change; possible building footprint extension, new auxiliary building, or major structural addition."
         )
 
     # 6. Generate Heatmap

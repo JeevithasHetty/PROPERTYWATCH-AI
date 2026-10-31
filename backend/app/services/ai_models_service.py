@@ -20,7 +20,7 @@ DEFAULT_MODELS = [
         "name": "LEVIR-CD Dual-Temporal Building Change Detector",
         "version": "2.1.0",
         "task": "Building Change Detection",
-        "provider": "Not configured (no trained model weights supplied)",
+        "provider": "Not configured",
         "is_available": False,
         "confidence_threshold": 0.65,
         "limitations": (
@@ -40,7 +40,7 @@ DEFAULT_MODELS = [
         "name": "Rooftop Solar PV & Small Object Detector",
         "version": "1.3.0",
         "task": "Rooftop Small-Object Detection",
-        "provider": "Not configured (no trained small-object weights supplied)",
+        "provider": "Not configured",
         "is_available": False,
         "confidence_threshold": 0.60,
         "limitations": (
@@ -101,10 +101,17 @@ def init_ai_model_registry():
                 )
                 db.add(model_entry)
             elif m_data["model_key"] in {"LEVIR-CD-Building-v2", "Rooftop-Solar-SmallObj-v1"}:
-                existing.is_available = False
-                existing.provider = m_data["provider"]
                 existing.limitations = m_data["limitations"]
                 existing.metadata_info = m_data.get("metadata_info")
+        # Availability reflects reality: weights present AND loadable by onnxruntime.
+        for key, det in (("LEVIR-CD-Building-v2", None), ("Rooftop-Solar-SmallObj-v1", None)):
+            entry = db.query(AIModelRegistry).filter(AIModelRegistry.model_key == key).first()
+            if not entry:
+                continue
+            runner = _levir_runner if key.startswith("LEVIR") else _rooftop_runner
+            ok, why = runner.check()
+            entry.is_available = ok
+            entry.provider = ("ONNX Runtime: " + Path(runner.path).name) if ok else f"Not available: {why}"
         db.commit()
     except Exception as e:
         logger.error(f"Error initializing AI model registry: {e}")
@@ -113,325 +120,226 @@ def init_ai_model_registry():
         db.close()
 
 
+# ----------------------------------------------------------------------------- ONNX runners
+class _OnnxRunner:
+    """Lazy ONNX Runtime session. Reports unavailable (never fakes) if weights/runtime are missing."""
+
+    def __init__(self, path_getter, default_name):
+        self._path_getter = path_getter
+        self._default_name = default_name
+        self._session = None
+        self._loaded_path = None
+
+    @property
+    def path(self) -> str:
+        configured = self._path_getter()
+        if configured:
+            return configured
+        return str(settings.MODELS_DIR / self._default_name)
+
+    def check(self):
+        p = Path(self.path)
+        if not p.is_file():
+            return False, f"weights file not found at {p} (set the model path env var or place the file there)"
+        try:
+            self.session()
+        except Exception as exc:  # noqa: BLE001
+            return False, f"could not load ONNX model: {exc}"
+        return True, "ok"
+
+    def session(self):
+        path = self.path
+        if self._session is None or self._loaded_path != path:
+            import onnxruntime as ort  # local import: optional dependency
+            self._session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            self._loaded_path = path
+        return self._session
+
+    def reset(self):
+        self._session = None
+
+
+_levir_runner = _OnnxRunner(lambda: settings.LEVIR_CD_MODEL_PATH, "levir_cd.onnx")
+_rooftop_runner = _OnnxRunner(lambda: settings.ROOFTOP_MODEL_PATH, "rooftop_yolo.onnx")
+
+
+def _unavailable(model_key, why, extra=None):
+    out = {"status": "UNAVAILABLE", "model_key": model_key, "model_version": None, "confidence": None,
+           "limitations": f"Model not operational: {why}. No prediction was generated."}
+    out.update(extra or {})
+    return out
+
+
+def _record(model_key, entity_type, entity_id, result, features, raw):
+    db = SessionLocal()
+    try:
+        model = db.query(AIModelRegistry).filter(AIModelRegistry.model_key == model_key).first()
+        if model and result.get("status") == "COMPLETED":
+            db.add(ModelInference(
+                model_id=model.id, entity_type=entity_type, entity_id=entity_id,
+                confidence=result.get("confidence"), detected_features=features,
+                result_summary=result.get("summary", ""), limitations_disclaimer=result.get("limitations"),
+                raw_output=raw, is_simulated=False))
+            db.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not record inference: %s", exc)
+        db.rollback()
+    finally:
+        db.close()
+
+
 class LEVIRCDBuildingDetector:
     """
-    Building-change detection service informed by the LEVIR-CD benchmark.
-    Performs bitemporal structural feature comparison to detect:
-    - Building footprint expansions (horizontal extensions)
-    - Additional floors / structural height changes
-    - Outbuildings and new detached structures
+    Bi-temporal building change detection with a trained ONNX change-detection network
+    (e.g. a LEVIR-CD-trained FC-Siam / BIT / ChangeFormer export).
+
+    Accepted ONNX signatures (auto-detected):
+      * two inputs  (A, B), each float32 [1,3,H,W]
+      * one input   float32 [1,6,H,W] = concat(A, B)
+    Output: change logits/probabilities [1,1,H,W] (sigmoid) or [1,2,H,W] (softmax, class 1 = change).
+    Inputs are RGB scaled to 0..1 then normalised with mean/std 0.5 (the LEVIR-CD convention).
     """
 
     def __init__(self):
         self.model_key = "LEVIR-CD-Building-v2"
 
-    def detect_building_changes(
-        self,
-        baseline_img_path: str,
-        target_img_path: str,
-        property_id: int
-    ) -> Dict[str, Any]:
-        """
-        Execute dual-temporal building change inference.
-        Returns structured detection metrics, bounding boxes, confidence, and audit metadata.
-        """
-        return {
-            "status": "UNAVAILABLE",
-            "model_key": self.model_key,
-            "model_version": None,
-            "change_detected": None,
-            "confidence": None,
-            "detected_features": [],
-            "limitations": "No trained LEVIR-CD model weights are configured. OpenCV image differencing remains available as a non-model visual comparison."
-        }
-
+    def detect_building_changes(self, baseline_img_path: str, target_img_path: str, property_id: int) -> Dict[str, Any]:
+        ok, why = _levir_runner.check()
+        if not ok:
+            return _unavailable(self.model_key, why, {"change_detected": None, "detected_features": []})
         if not os.path.exists(baseline_img_path) or not os.path.exists(target_img_path):
-            return {
-                "status": "FAILED",
-                "error": "One or both input imagery assets are unavailable.",
-                "change_detected": False,
-                "confidence": 0.0,
-                "limitations": "Missing imagery source files."
-            }
-
+            return {"status": "FAILED", "model_key": self.model_key, "error": "Input imagery files are missing.",
+                    "limitations": "Missing imagery source files."}
         try:
-            # Read images
-            im_base = cv2.imread(baseline_img_path)
-            im_target = cv2.imread(target_img_path)
+            a, b = cv2.imread(baseline_img_path), cv2.imread(target_img_path)
+            if a is None or b is None:
+                return {"status": "FAILED", "model_key": self.model_key, "error": "Could not decode imagery."}
+            sess = _levir_runner.session()
+            inputs = sess.get_inputs()
+            size = 256
+            shp = inputs[0].shape
+            if len(shp) == 4 and isinstance(shp[2], int) and isinstance(shp[3], int):
+                size = int(shp[2])
 
-            if im_base is None or im_target is None:
-                return {
-                    "status": "FAILED",
-                    "error": "Failed to decode imagery files.",
-                    "change_detected": False,
-                    "confidence": 0.0
-                }
+            def prep(img):
+                img = cv2.cvtColor(cv2.resize(img, (size, size), interpolation=cv2.INTER_CUBIC), cv2.COLOR_BGR2RGB)
+                return ((img.astype(np.float32) / 255.0 - 0.5) / 0.5).transpose(2, 0, 1)[None]
 
-            # Standardize sizes (800x800)
-            target_size = (800, 800)
-            im_base_res = cv2.resize(im_base, target_size)
-            im_target_res = cv2.resize(im_target, target_size)
-
-            # Convert to LAB color space for robust luminance separation
-            lab1 = cv2.cvtColor(im_base_res, cv2.COLOR_BGR2LAB)
-            lab2 = cv2.cvtColor(im_target_res, cv2.COLOR_BGR2LAB)
-
-            # Luminance & structural gradient diff
-            diff_l = cv2.absdiff(lab1[:, :, 0], lab2[:, :, 0])
-            diff_a = cv2.absdiff(lab1[:, :, 1], lab2[:, :, 1])
-            diff_b = cv2.absdiff(lab1[:, :, 2], lab2[:, :, 2])
-            combined_diff = cv2.addWeighted(diff_l, 0.6, cv2.addWeighted(diff_a, 0.5, diff_b, 0.5, 0), 0.4, 0)
-
-            # Morphological structural closing to merge building components
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-            closed = cv2.morphologyEx(combined_diff, cv2.MORPH_CLOSE, kernel)
-            _, thresh = cv2.threshold(closed, 40, 255, cv2.THRESH_BINARY)
-
-            contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            detected_boxes = []
-            total_change_area = 0
-
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if area > 1200: # Filter small noise
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    aspect_ratio = float(w) / max(1, h)
-                    # Classify suspected modification category
-                    category = "Building Footprint Extension"
-                    if y > 250 and y < 500 and (x > 250 and x < 550):
-                        category = "Potential Roof Structure / Floor Addition"
-                    elif y < 220:
-                        category = "Backyard Outbuilding / Structure"
-
-                    conf = float(np.clip(0.65 + (min(area, 20000) / 20000.0) * 0.28, 0.65, 0.94))
-                    detected_boxes.append({
-                        "box": [int(y), int(x), int(y + h), int(x + w)],
-                        "category": category,
-                        "area_pixels": int(area),
-                        "confidence": round(conf, 3),
-                        "aspect_ratio": round(aspect_ratio, 2)
-                    })
-                    total_change_area += area
-
-            total_pixels = target_size[0] * target_size[1]
-            change_pct = (total_change_area / total_pixels) * 100.0
-            change_detected = len(detected_boxes) > 0
-
-            overall_conf = round(float(np.mean([b["confidence"] for b in detected_boxes])), 3) if detected_boxes else 0.0
-
+            pa, pb = prep(a), prep(b)
+            if len(inputs) >= 2:
+                out = sess.run(None, {inputs[0].name: pa, inputs[1].name: pb})[0]
+            else:
+                out = sess.run(None, {inputs[0].name: np.concatenate([pa, pb], axis=1)})[0]
+            out = np.asarray(out, dtype=np.float32)
+            if out.shape[1] == 2:
+                e = np.exp(out - out.max(axis=1, keepdims=True))
+                prob = (e / e.sum(axis=1, keepdims=True))[0, 1]
+            else:
+                x = out[0, 0]
+                prob = 1.0 / (1.0 + np.exp(-x)) if (x.min() < 0 or x.max() > 1) else x
+            thr = 0.5
+            mask = (prob >= thr).astype(np.uint8)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            min_area = 0.002 * size * size
+            feats = []
+            for c in contours:
+                area = cv2.contourArea(c)
+                if area < min_area:
+                    continue
+                x, y, w, h = cv2.boundingRect(c)
+                region = prob[y:y + h, x:x + w][mask[y:y + h, x:x + w] > 0]
+                feats.append({"box": [int(y), int(x), int(y + h), int(x + w)], "image_size": size,
+                              "area_pixels": int(area), "confidence": round(float(region.mean()), 3)})
+            pct = float(mask.mean() * 100.0)
+            conf = round(float(np.mean([f["confidence"] for f in feats])), 3) if feats else 0.0
             result = {
-                "status": "COMPLETED",
-                "model_key": self.model_key,
-                "model_name": "LEVIR-CD Dual-Temporal Building Change Detector",
-                "model_version": "2.1.0",
-                "change_detected": change_detected,
-                "change_area_percentage": round(change_pct, 2),
-                "confidence": overall_conf,
-                "detected_features": detected_boxes,
-                "structural_modifications_count": len(detected_boxes),
-                "summary": (
-                    f"LEVIR-CD detected {len(detected_boxes)} structural building variance sector(s) "
-                    f"covering {change_pct:.1f}% of property footprint with mean confidence {overall_conf:.2f}."
-                    if change_detected else
-                    "LEVIR-CD analysis detected no prominent structural footprint variances between observation dates. "
-                    "Note: Absence of detectable optical variance does not prove zero modification."
-                ),
-                "limitations": (
-                    "LEVIR-CD architecture trained on bitemporal optical sets. Sensor zenith angle, seasonal foliage, "
-                    "and ground sampling distance influence boundary delineations. Findings are advisory only."
-                )
+                "status": "COMPLETED", "model_key": self.model_key,
+                "model_name": "Trained building change-detection network (ONNX)",
+                "model_version": Path(_levir_runner.path).stem,
+                "change_detected": bool(feats), "change_area_percentage": round(pct, 2),
+                "confidence": conf, "detected_features": feats, "structural_modifications_count": len(feats),
+                "summary": (f"Model flagged {len(feats)} changed region(s) covering {pct:.1f}% of the scene "
+                            f"(mean confidence {conf:.2f})." if feats else
+                            "Model found no changed building regions. This does not prove that no modification occurred."),
+                "limitations": ("LEVIR-CD style networks are trained on <=1 m imagery. On 10 m Sentinel-2 tiles only "
+                                "large footprint changes are resolvable. Output is advisory and needs human review."),
             }
-
-            # Record inference in database
-            self._record_inference(property_id, result)
+            _record(self.model_key, "Modification", f"PROP-{property_id}", result, feats,
+                    {"change_area_percentage": result["change_area_percentage"], "threshold": thr})
             return result
-
-        except Exception as e:
-            logger.error(f"Error executing LEVIR-CD building change detection: {e}")
-            return {
-                "status": "SYSTEM_ERROR",
-                "error": str(e),
-                "change_detected": False,
-                "confidence": 0.0,
-                "limitations": "Inference interrupted by runtime exception."
-            }
-
-    def _record_inference(self, property_id: int, result: Dict[str, Any]):
-        db = SessionLocal()
-        try:
-            model = db.query(AIModelRegistry).filter(AIModelRegistry.model_key == self.model_key).first()
-            if model and result.get("status") == "COMPLETED":
-                inf = ModelInference(
-                    model_id=model.id,
-                    entity_type="Modification",
-                    entity_id=f"PROP-{property_id}",
-                    confidence=result.get("confidence"),
-                    detected_features=result.get("detected_features"),
-                    result_summary=result.get("summary", ""),
-                    limitations_disclaimer=result.get("limitations"),
-                    raw_output={"change_area_percentage": result.get("change_area_percentage")},
-                    is_simulated=False
-                )
-                db.add(inf)
-                db.commit()
-        except Exception as e:
-            logger.warning(f"Could not record inference log: {e}")
-            db.rollback()
-        finally:
-            db.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Building change inference failed")
+            return {"status": "SYSTEM_ERROR", "model_key": self.model_key, "error": str(exc),
+                    "limitations": "Inference interrupted by runtime exception."}
 
 
 class RooftopSmallObjectDetector:
     """
-    Dedicated small-object detector for rooftop infrastructure:
-    - Solar photovoltaic (PV) panel arrays
-    - Rooftop HVAC / mechanical equipment
-    - Skylights and roof deck structures
+    Rooftop object detection with a trained YOLO-family ONNX model (Ultralytics export,
+    output [1, 4+num_classes, N] or [1, N, 4+num_classes]). Class names come from ROOFTOP_MODEL_CLASSES.
     """
 
     def __init__(self):
         self.model_key = "Rooftop-Solar-SmallObj-v1"
 
-    def detect_rooftop_objects(
-        self,
-        image_path: str,
-        property_id: int
-    ) -> Dict[str, Any]:
-        """
-        Execute small-object detection on property rooftop.
-        Returns detected bounding boxes, object classification, confidence, and limitations.
-        """
-        return {
-            "status": "UNAVAILABLE",
-            "model_key": self.model_key,
-            "model_version": None,
-            "solar_detected": None,
-            "objects_count": None,
-            "objects": [],
-            "confidence": None,
-            "limitations": "No trained rooftop small-object model weights are configured; no rooftop-object predictions were generated."
-        }
-
+    def detect_rooftop_objects(self, image_path: str, property_id: int) -> Dict[str, Any]:
+        ok, why = _rooftop_runner.check()
+        if not ok:
+            return _unavailable(self.model_key, why, {"solar_detected": None, "objects_count": None, "objects": []})
         if not os.path.exists(image_path):
-            return {
-                "status": "FAILED",
-                "error": f"Image file not found: {image_path}",
-                "objects_detected": [],
-                "confidence": 0.0
-            }
-
+            return {"status": "FAILED", "model_key": self.model_key, "error": f"Image file not found: {image_path}"}
         try:
             img = cv2.imread(image_path)
             if img is None:
-                return {"status": "FAILED", "error": "Failed to decode image"}
-
-            h, w, _ = img.shape
-            # Focus on central roof zone (approx 20% to 80% box)
-            roof_roi = img[int(h * 0.2):int(h * 0.75), int(w * 0.25):int(w * 0.75)]
-            gray = cv2.cvtColor(roof_roi, cv2.COLOR_BGR2GRAY)
-
-            # High-pass filter for regular rectangular panel grids
-            grad_x = cv2.Sobel(gray, cv2.CV_16S, 1, 0, ksize=3)
-            grad_y = cv2.Sobel(gray, cv2.CV_16S, 0, 1, ksize=3)
-            abs_grad = cv2.addWeighted(cv2.convertScaleAbs(grad_x), 0.5, cv2.convertScaleAbs(grad_y), 0.5, 0)
-
-            # Detect low-luminance high-contrast silicon cells
-            _, dark_mask = cv2.threshold(gray, 70, 255, cv2.THRESH_BINARY_INV)
-            combined = cv2.bitwise_and(abs_grad, dark_mask)
-
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 5))
-            closed = cv2.morphologyEx(combined, cv2.MORPH_CLOSE, kernel)
-
-            contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-            detected_objects = []
-            roi_y_offset = int(h * 0.2)
-            roi_x_offset = int(w * 0.25)
-
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                # Panels typically occupy 400 - 15000 px in 800x800 image
-                if 350 < area < 25000:
-                    rx, ry, rw, rh = cv2.boundingRect(cnt)
-                    aspect = float(rw) / max(1, rh)
-                    # Panels have distinctive aspect ratios and grid alignments
-                    if 0.5 < aspect < 3.5:
-                        conf = float(np.clip(0.68 + (min(area, 8000) / 8000.0) * 0.24, 0.68, 0.92))
-                        detected_objects.append({
-                            "label": "Rooftop Solar PV Array",
-                            "confidence": round(conf, 3),
-                            "box": [
-                                roi_y_offset + ry,
-                                roi_x_offset + rx,
-                                roi_y_offset + ry + rh,
-                                roi_x_offset + rx + rw
-                            ],
-                            "estimated_area_sqm": round(area * 0.05, 1),
-                            "aspect_ratio": round(aspect, 2)
-                        })
-
-            has_solar = len(detected_objects) > 0
-            mean_conf = round(float(np.mean([o["confidence"] for o in detected_objects])), 3) if detected_objects else 0.0
-
+                return {"status": "FAILED", "model_key": self.model_key, "error": "Failed to decode image"}
+            sess = _rooftop_runner.session()
+            inp = sess.get_inputs()[0]
+            size = int(inp.shape[2]) if len(inp.shape) == 4 and isinstance(inp.shape[2], int) else 640
+            h0, w0 = img.shape[:2]
+            blob = cv2.cvtColor(cv2.resize(img, (size, size)), cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            out = np.asarray(sess.run(None, {inp.name: blob.transpose(2, 0, 1)[None]})[0])[0]
+            classes = [c.strip() for c in settings.ROOFTOP_MODEL_CLASSES.split(",") if c.strip()]
+            if out.shape[0] < out.shape[1]:
+                out = out.T  # -> [N, 4+nc]
+            thr = 0.60
+            boxes, scores, cls_ids = [], [], []
+            for row in out:
+                cs = row[4:]
+                cid = int(np.argmax(cs))
+                sc = float(cs[cid])
+                if sc < thr:
+                    continue
+                cx, cy, w, h = row[:4]
+                boxes.append([int((cx - w / 2) * w0 / size), int((cy - h / 2) * h0 / size),
+                              int(w * w0 / size), int(h * h0 / size)])
+                scores.append(sc)
+                cls_ids.append(cid)
+            keep = cv2.dnn.NMSBoxes(boxes, scores, thr, 0.45) if boxes else []
+            objs = []
+            for i in np.array(keep).flatten():
+                x, y, w, h = boxes[i]
+                label = classes[cls_ids[i]] if cls_ids[i] < len(classes) else f"class_{cls_ids[i]}"
+                objs.append({"label": label, "confidence": round(scores[i], 3), "box": [y, x, y + h, x + w]})
+            mean_conf = round(float(np.mean([o["confidence"] for o in objs])), 3) if objs else 0.0
             result = {
-                "status": "COMPLETED",
-                "model_key": self.model_key,
-                "model_name": "Rooftop Solar PV & Small Object Detector",
-                "model_version": "1.3.0",
-                "solar_detected": has_solar,
-                "objects_count": len(detected_objects),
-                "objects": detected_objects,
-                "confidence": mean_conf,
-                "summary": (
-                    f"Identified {len(detected_objects)} potential rooftop solar array cluster(s) "
-                    f"with confidence {mean_conf:.2f}."
-                    if has_solar else
-                    "No prominent rooftop photovoltaic arrays or small mechanical clusters detected."
-                ),
-                "limitations": (
-                    "Small-object detection requires high visual contrast. Shadowing from adjacent trees or "
-                    "skylight glare may influence detection confidence. Requires corroborating electrical permit."
-                )
+                "status": "COMPLETED", "model_key": self.model_key,
+                "model_name": "Rooftop object detector (ONNX)", "model_version": Path(_rooftop_runner.path).stem,
+                "solar_detected": any("solar" in o["label"].lower() or "pv" in o["label"].lower() for o in objs),
+                "objects_count": len(objs), "objects": objs, "confidence": mean_conf,
+                "summary": (f"Detected {len(objs)} rooftop object(s) with mean confidence {mean_conf:.2f}."
+                            if objs else "No rooftop objects detected above the confidence threshold."),
+                "limitations": ("Detection requires imagery fine enough to resolve rooftop equipment (<=0.5 m). "
+                                "Sentinel-2 (10 m) is not suitable. Corroborate with permits/invoices."),
             }
-
-            self._record_inference(property_id, result)
+            _record(self.model_key, "RooftopFeature", f"PROP-{property_id}", result, objs,
+                    {"objects_count": len(objs), "threshold": thr})
             return result
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Rooftop inference failed")
+            return {"status": "SYSTEM_ERROR", "model_key": self.model_key, "error": str(exc),
+                    "limitations": "Inference interrupted by runtime exception."}
 
-        except Exception as e:
-            logger.error(f"Error executing rooftop small-object detection: {e}")
-            return {
-                "status": "SYSTEM_ERROR",
-                "error": str(e),
-                "solar_detected": False,
-                "confidence": 0.0,
-                "limitations": "Inference interrupted by runtime exception."
-            }
 
-    def _record_inference(self, property_id: int, result: Dict[str, Any]):
-        db = SessionLocal()
-        try:
-            model = db.query(AIModelRegistry).filter(AIModelRegistry.model_key == self.model_key).first()
-            if model and result.get("status") == "COMPLETED":
-                inf = ModelInference(
-                    model_id=model.id,
-                    entity_type="RooftopFeature",
-                    entity_id=f"PROP-{property_id}",
-                    confidence=result.get("confidence"),
-                    detected_features=result.get("objects"),
-                    result_summary=result.get("summary", ""),
-                    limitations_disclaimer=result.get("limitations"),
-                    raw_output={"objects_count": result.get("objects_count")},
-                    is_simulated=False
-                )
-                db.add(inf)
-                db.commit()
-        except Exception as e:
-            logger.warning(f"Could not record rooftop inference log: {e}")
-            db.rollback()
-        finally:
-            db.close()
-
-# Singleton instances
 levir_cd_detector = LEVIRCDBuildingDetector()
 rooftop_object_detector = RooftopSmallObjectDetector()
