@@ -46,3 +46,25 @@ The limit and deductible keys must exist in the linked policy's terms and `terms
 ## Test coverage
 
 `backend/tests/test_workflow_safety.py` checks that omitted policy terms remain absent at the API/schema boundary, missing terms do not produce automatic conclusions, and provisional inputs do not provide caller-supplied policy limits or deductibles.
+
+
+## Extended rules (15 total)
+
+All rules read **verified** policy terms only. Unverified terms yield `PENDING_REVIEW`. No rule rejects a claim;
+outcomes are alerts for a human reviewer. A property modification never by itself reduces or rejects a claim.
+
+| Code | Covers | Inputs (verified policy terms) |
+| --- | --- | --- |
+| RULE-PERIL-INSURED-01 | Insured event | `structured_terms.insured_perils` |
+| RULE-EXCL-GENERAL-01 | Exclusions (other than flood / unpermitted) | `exclusions` |
+| RULE-SUBLIMIT-01 | Sub-limits on itemised loss | `structured_terms.sub_limits`, `claim.loss_items` |
+| RULE-UNDERINS-01 | Underinsurance / average clause | `sum_insured`, `reinstatement_value`, `average_clause` |
+| RULE-DUP-CLAIM-01 | Duplicate claims, reused evidence files | other claims on the policy (window in rule config, default 30 days) |
+| RULE-USAGE-CHANGE-01 | Property usage change | `structured_terms.insured_usage` |
+| RULE-PERMIT-VERIFY-01 | Construction permits | permit number in declarations / permit evidence |
+| RULE-MOD-UNDECLARED-01 | Undeclared modifications | owner declarations; verified `conditions` text |
+
+Deductibles (RULE-DED-APPLY-01), policy period, coverage limit, unpermitted-construction exclusion, flood exclusion,
+solar endorsement and timely declaration are the original seven rules (unchanged in behaviour; amounts now in INR).
+The provisional calculation applies a proportional reduction only when RULE-UNDERINS-01's inputs are verified and the
+policy records an average clause.

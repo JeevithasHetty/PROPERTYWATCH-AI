@@ -8,7 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.models import InsurancePolicy, PolicyRule, PolicyRuleExecution, Claim, Modification, OwnerDeclaration
 from app.database import SessionLocal
-from app.services.formatting import format_money
+from app.services.format_utils import format_inr
+from app.models import ClaimEvidence, Property
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,31 @@ DEFAULT_POLICY_RULES = [
         "version": "1.0",
         "description": "Checks whether the owner submitted a timely declaration and corroborating documentation for detected physical property alterations.",
         "rule_config": {"flag_unreported_modifications": True}
-    }
+    },
+    {"rule_code": "RULE-PERIL-INSURED-01", "name": "Insured Event (Named Peril) Check", "category": "Insured Event", "version": "1.0",
+     "description": "Checks the reported cause of loss against the insured perils recorded from the verified policy terms.",
+     "rule_config": {"requires_verified_terms": True}},
+    {"rule_code": "RULE-EXCL-GENERAL-01", "name": "Policy Exclusion Screening", "category": "Exclusion", "version": "1.0",
+     "description": "Screens the reported cause/description against every verified policy exclusion (other than flood and unpermitted construction, which have dedicated rules).",
+     "rule_config": {"match": "keyword"}},
+    {"rule_code": "RULE-SUBLIMIT-01", "name": "Sub-limit Application", "category": "Coverage Limit", "version": "1.0",
+     "description": "Applies verified per-category sub-limits to itemised loss amounts.",
+     "rule_config": {"requires_loss_items": True}},
+    {"rule_code": "RULE-UNDERINS-01", "name": "Underinsurance (Average Clause) Check", "category": "Coverage Limit", "version": "1.0",
+     "description": "Compares the verified sum insured with the verified reinstatement value; proportional reduction applies only if the policy has an average clause.",
+     "rule_config": {"apply_only_with_average_clause": True}},
+    {"rule_code": "RULE-DUP-CLAIM-01", "name": "Duplicate Claim Screening", "category": "Claim Integrity", "version": "1.0",
+     "description": "Flags other claims on the same policy for the same cause within a window of the incident date, and evidence files reused across claims.",
+     "rule_config": {"window_days": 30}},
+    {"rule_code": "RULE-USAGE-CHANGE-01", "name": "Property Usage Change Check", "category": "Declaration", "version": "1.0",
+     "description": "Compares the insured usage in the verified policy with the registered property type and with usage indicated in claim/modification records.",
+     "rule_config": {"requires_verified_terms": True}},
+    {"rule_code": "RULE-PERMIT-VERIFY-01", "name": "Construction Permit Verification", "category": "Declaration", "version": "1.0",
+     "description": "Checks that detected construction-type modifications have a permit on record (declaration or evidence).",
+     "rule_config": {}},
+    {"rule_code": "RULE-MOD-UNDECLARED-01", "name": "Undeclared Modification Check", "category": "Declaration", "version": "1.0",
+     "description": "Flags property modifications without an owner declaration so information can be requested. A modification never by itself reduces or rejects a claim.",
+     "rule_config": {}},
 ]
 
 def init_policy_rules_in_db():
@@ -137,21 +162,21 @@ def extract_policy_terms_from_text(raw_text: str) -> Dict[str, Any]:
         extracted["expiry_date"] = exp_match.group(1).strip()
 
     # 4. Coverage Limits
-    dwelling_match = re.search(r"(?:Coverage\s*A|Dwelling(?:\s*Limit)?)\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
+    dwelling_match = re.search(r"(?:Coverage\s*A|Dwelling(?:\s*Limit)?)\s*:?\s*(?:\$|₹|Rs\.?|INR)?\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if dwelling_match:
         try:
             extracted["coverage_limits"]["dwelling"] = float(dwelling_match.group(1).replace(",", ""))
         except ValueError:
             pass
 
-    personal_prop_match = re.search(r"(?:Coverage\s*C|Personal\s*Property)\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
+    personal_prop_match = re.search(r"(?:Coverage\s*C|Personal\s*Property)\s*:?\s*(?:\$|₹|Rs\.?|INR)?\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if personal_prop_match:
         try:
             extracted["coverage_limits"]["personal_property"] = float(personal_prop_match.group(1).replace(",", ""))
         except ValueError:
             pass
 
-    other_struct_match = re.search(r"(?:Coverage\s*B|Other\s*Structures)\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
+    other_struct_match = re.search(r"(?:Coverage\s*B|Other\s*Structures)\s*:?\s*(?:\$|₹|Rs\.?|INR)?\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if other_struct_match:
         try:
             extracted["coverage_limits"]["other_structures"] = float(other_struct_match.group(1).replace(",", ""))
@@ -159,14 +184,14 @@ def extract_policy_terms_from_text(raw_text: str) -> Dict[str, Any]:
             pass
 
     # 5. Deductibles
-    std_ded_match = re.search(r"(?:Standard|All\s*Perils?|Policy)\s*Deductible\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
+    std_ded_match = re.search(r"(?:Standard|All\s*Perils?|Policy)\s*Deductible\s*:?\s*(?:\$|₹|Rs\.?|INR)?\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if std_ded_match:
         try:
             extracted["deductibles"]["standard"] = float(std_ded_match.group(1).replace(",", ""))
         except ValueError:
             pass
 
-    wind_ded_match = re.search(r"(?:Wind(?:storm)?(?:\s*/\s*Hail)?)\s*Deductible\s*:?\s*[₹$]?([0-9,]+)", raw_text, re.IGNORECASE)
+    wind_ded_match = re.search(r"(?:Wind(?:storm)?(?:\s*/\s*Hail)?)\s*Deductible\s*:?\s*(?:\$|₹|Rs\.?|INR)?\s*([0-9,]+)", raw_text, re.IGNORECASE)
     if wind_ded_match:
         try:
             extracted["deductibles"]["wind_hail"] = float(wind_ded_match.group(1).replace(",", ""))
@@ -325,7 +350,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "PASS",
-                "explanation": f"Claimed amount ({format_money(amt)}) is within the verified dwelling limit ({format_money(dwelling_limit)}).",
+                "explanation": f"Claimed amount ({format_inr(amt)}) is within the verified dwelling limit ({format_inr(dwelling_limit)}).",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -334,7 +359,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "ALERT_CREATED",
-                "explanation": f"Claimed amount ({format_money(amt)}) exceeds policy dwelling limit ({format_money(dwelling_limit)}) by {format_money(amt - dwelling_limit)}. Provisional payout must be capped.",
+                "explanation": f"Claimed amount ({format_inr(amt)}) exceeds policy dwelling limit ({format_inr(dwelling_limit)}) by {format_inr(amt - dwelling_limit)}. Provisional payout must be capped.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -388,7 +413,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "INCONCLUSIVE",
-                "explanation": f"Applicable deductible determined as {format_money(applicable_ded)} ({ded_type}), but loss amount is missing.",
+                "explanation": f"Applicable deductible determined as {format_inr(applicable_ded)} ({ded_type}), but loss amount is missing.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -398,7 +423,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "ALERT_CREATED",
-                "explanation": f"Claimed loss ({format_money(amt)}) is below or equal to the applicable {ded_type} ({format_money(applicable_ded)}). No net provisional payment.",
+                "explanation": f"Claimed loss ({format_inr(amt)}) is below or equal to the applicable {ded_type} ({format_inr(applicable_ded)}). No net provisional payment.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -407,7 +432,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "PASS",
-                "explanation": f"Claimed loss ({format_money(amt)}) exceeds {ded_type} ({format_money(applicable_ded)}). Net provisional loss base: {format_money(amt - applicable_ded)}.",
+                "explanation": f"Claimed loss ({format_inr(amt)}) exceeds {ded_type} ({format_inr(applicable_ded)}). Net provisional loss base: {format_inr(amt - applicable_ded)}.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -495,7 +520,7 @@ class PolicyRulesEngine:
                 "rule_code": rule_code,
                 "rule_name": rule_name,
                 "result": "ALERT_CREATED",
-                "explanation": f"Unpermitted structural alteration detected ({modification.suspected_category}) without permit. Exclusion clause may apply to damage in altered sector.",
+                "explanation": f"Unpermitted structural alteration detected ({modification.suspected_category}) without permit. The recorded exclusion may be relevant ONLY if the loss arises from the altered portion; a reviewer must establish that link. The modification alone is not grounds for rejection.",
                 "applicable_clause": clause,
                 "inputs": inputs
             }
@@ -724,6 +749,237 @@ class PolicyRulesEngine:
             }
 
 
+# ----------------------------------------------------------------------------- extended rules
+_SEVERITY = {"ALERT_CREATED": 5, "MORE_EVIDENCE_REQUIRED": 4, "PENDING_REVIEW": 3, "INCONCLUSIVE": 2, "PASS": 1}
+_PERIL_SYNONYMS = {
+    "storm": ["wind", "storm", "cyclone", "tempest", "hurricane", "typhoon", "tornado", "gale"],
+    "flood": ["flood", "inundation", "waterlogging", "cloudburst"],
+    "fire": ["fire", "burn", "smoke"], "lightning": ["lightning", "thunderbolt"],
+    "explosion": ["explosion", "blast"], "impact": ["impact", "tree fall", "falling tree", "vehicle", "collision"],
+    "subsidence": ["subsidence", "landslide", "rockslide", "sinking"], "riot": ["riot", "strike", "malicious", "vandal"],
+    "earthquake": ["earthquake", "seismic", "tremor"], "water": ["burst", "overflow", "leak", "pipe", "tank"],
+    "hail": ["hail"], "terror": ["terror"],
+}
+_CONSTRUCTION = ("extension", "floor", "structure", "outbuilding", "pool", "construction", "addition", "wing", "building")
+
+
+def _res(code, name, result, explanation, clause=None, inputs=None):
+    return {"rule_code": code, "rule_name": name, "result": result, "explanation": explanation,
+            "applicable_clause": clause, "inputs": inputs or {}}
+
+
+def _terms(policy) -> Dict[str, Any]:
+    return policy.structured_terms or {}
+
+
+def _unverified(code, name, policy, what):
+    if not policy.terms_verified:
+        return _res(code, name, "PENDING_REVIEW", f"Policy terms are not verified; {what} cannot be relied on.",
+                    inputs={"terms_verified": False})
+    return None
+
+
+def _cause_text(claim, cause=None) -> str:
+    return " ".join(filter(None, [cause, claim.reported_cause if claim else None,
+                                  claim.description if claim else None])).lower()
+
+
+def _kw_hit(peril: str, text: str) -> bool:
+    low = peril.lower()
+    for key, words in _PERIL_SYNONYMS.items():
+        if key in low or any(w in low for w in words):
+            if any(w in text for w in words):
+                return True
+    return any(tok in text for tok in re.findall(r"[a-z]{5,}", low))
+
+
+def evaluate_rule_peril_insured(policy, claim, cause=None):
+    code, name = "RULE-PERIL-INSURED-01", "Insured Event (Named Peril) Check"
+    if not claim and not cause:
+        return _res(code, name, "INCONCLUSIVE", "No claim or cause of loss supplied.")
+    pend = _unverified(code, name, policy, "the insured-peril list")
+    if pend:
+        return pend
+    perils = _terms(policy).get("insured_perils") or []
+    text = _cause_text(claim, cause)
+    inputs = {"insured_perils": perils, "cause_text": text[:300]}
+    if not perils:
+        return _res(code, name, "PENDING_REVIEW", "No insured perils are recorded for this policy; a reviewer must record them from the policy document.", inputs=inputs)
+    hit = next((p for p in perils if _kw_hit(p, text)), None)
+    if hit:
+        return _res(code, name, "PASS", f"The reported cause corresponds to a recorded insured peril: '{hit}'.", hit, inputs)
+    return _res(code, name, "ALERT_CREATED", "The reported cause does not match any recorded insured peril. A reviewer must confirm against the policy wording before any outcome is recorded.", inputs=inputs)
+
+
+def evaluate_rule_general_exclusions(policy, claim, cause=None):
+    code, name = "RULE-EXCL-GENERAL-01", "Policy Exclusion Screening"
+    if not claim and not cause:
+        return _res(code, name, "INCONCLUSIVE", "No claim or cause of loss supplied.")
+    pend = _unverified(code, name, policy, "the exclusion list")
+    if pend:
+        return pend
+    text = _cause_text(claim, cause)
+    skip = ("flood", "unpermitted", "unauthorized", "unauthorised")
+    matches = []
+    for ex in policy.exclusions or []:
+        if any(k in ex.lower() for k in skip):
+            continue
+        toks = [t for t in re.findall(r"[a-z]{5,}", ex.lower()) if t not in ("damage", "losses", "caused", "arising", "other")]
+        if any(t in text for t in toks):
+            matches.append(ex)
+    inputs = {"exclusions_checked": len(policy.exclusions or []), "matched": matches}
+    if matches:
+        return _res(code, name, "ALERT_CREATED", f"The claim text overlaps with {len(matches)} recorded exclusion(s). Human review required; keyword overlap is not a coverage decision.", matches[0], inputs)
+    return _res(code, name, "PASS", "No recorded exclusion matched the reported cause. This is not confirmation of coverage.", inputs=inputs)
+
+
+def evaluate_rule_sublimit(policy, claim, loss_items=None):
+    code, name = "RULE-SUBLIMIT-01", "Sub-limit Application"
+    pend = _unverified(code, name, policy, "sub-limits")
+    if pend:
+        return pend
+    subs = _terms(policy).get("sub_limits") or {}
+    if not subs:
+        return _res(code, name, "INCONCLUSIVE", "No sub-limits are recorded for this policy.")
+    items = loss_items if loss_items is not None else (claim.loss_items if claim else None)
+    if not items:
+        return _res(code, name, "MORE_EVIDENCE_REQUIRED", "The policy has sub-limits but the claim has no itemised loss breakdown. Request an itemised estimate.", inputs={"sub_limits": subs})
+    capped, rows = [], []
+    for it in items:
+        cat, amt = str(it.get("category", "")).lower(), float(it.get("amount", 0) or 0)
+        limit_key = next((k for k in subs if k.lower() == cat or k.lower() in cat or cat in k.lower()), None) if cat else None
+        if limit_key and amt > float(subs[limit_key]):
+            capped.append({"category": it.get("category"), "claimed": amt, "sub_limit": subs[limit_key],
+                           "excess": amt - float(subs[limit_key])})
+        rows.append({"category": it.get("category"), "amount": amt, "sub_limit": subs.get(limit_key) if limit_key else None})
+    inputs = {"items": rows, "capped_items": capped}
+    if capped:
+        total = sum(c["excess"] for c in capped)
+        return _res(code, name, "ALERT_CREATED", f"{len(capped)} item(s) exceed their sub-limit; amount above sub-limits: {format_inr(total)}.", capped[0]["category"], inputs)
+    return _res(code, name, "PASS", "All itemised amounts are within recorded sub-limits.", inputs=inputs)
+
+
+def underinsurance_factor(policy) -> Optional[float]:
+    """Proportion applied by the average clause, or None when not applicable/unknown."""
+    t = _terms(policy)
+    si = t.get("sum_insured") or (policy.coverage_limits or {}).get("dwelling")
+    rv = t.get("reinstatement_value")
+    if not (policy.terms_verified and t.get("average_clause") and si and rv and rv > 0 and si < rv):
+        return None
+    return round(float(si) / float(rv), 6)
+
+
+def evaluate_rule_underinsurance(policy, claim=None):
+    code, name = "RULE-UNDERINS-01", "Underinsurance (Average Clause) Check"
+    pend = _unverified(code, name, policy, "sum insured and value at risk")
+    if pend:
+        return pend
+    t = _terms(policy)
+    si = t.get("sum_insured") or (policy.coverage_limits or {}).get("dwelling")
+    rv = t.get("reinstatement_value")
+    inputs = {"sum_insured": si, "reinstatement_value": rv, "average_clause": bool(t.get("average_clause"))}
+    if not si or not rv:
+        return _res(code, name, "PENDING_REVIEW", "Sum insured and/or reinstatement value are not recorded; a reviewer must supply the verified values.", inputs=inputs)
+    if si >= rv:
+        return _res(code, name, "PASS", f"Sum insured {format_inr(si)} covers the reinstatement value {format_inr(rv)}.", inputs=inputs)
+    ratio = si / rv
+    inputs["proportion"] = round(ratio, 6)
+    if t.get("average_clause"):
+        return _res(code, name, "ALERT_CREATED", f"Underinsured: sum insured is {ratio:.1%} of reinstatement value and the policy has an average clause; the payout may be reduced proportionally ({ratio:.1%}).", "average_clause", inputs)
+    return _res(code, name, "INCONCLUSIVE", f"Underinsured ({ratio:.1%}) but no average clause is recorded, so no proportional reduction is applied by the system.", inputs=inputs)
+
+
+def evaluate_rule_duplicate_claim(db, policy, claim, window_days=30):
+    code, name = "RULE-DUP-CLAIM-01", "Duplicate Claim Screening"
+    if not claim:
+        return _res(code, name, "INCONCLUSIVE", "No claim supplied.")
+    lo = claim.incident_date - datetime.timedelta(days=window_days)
+    hi = claim.incident_date + datetime.timedelta(days=window_days)
+    others = db.query(Claim).filter(Claim.policy_id == policy.id, Claim.id != claim.id,
+                                    Claim.incident_date >= lo, Claim.incident_date <= hi,
+                                    ~Claim.status.in_(["Denied", "Withdrawn"])).all()
+    same_cause = [o for o in others if o.reported_cause.strip().lower() == claim.reported_cause.strip().lower()]
+    hashes = [e.file_hash for e in claim.evidence_items if e.file_hash]
+    reused = []
+    if hashes:
+        reused = db.query(ClaimEvidence).filter(ClaimEvidence.file_hash.in_(hashes), ClaimEvidence.claim_id != claim.id).all()
+    inputs = {"window_days": window_days, "same_cause_claims": [o.claim_reference for o in same_cause],
+              "nearby_other_claims": [o.claim_reference for o in others],
+              "reused_evidence_claims": sorted({r.claim_id for r in reused})}
+    if same_cause or reused:
+        return _res(code, name, "ALERT_CREATED", "Possible duplicate: " + (f"claim(s) {', '.join(o.claim_reference for o in same_cause)} on this policy have the same cause within {window_days} days. " if same_cause else "") + ("Evidence files identical to those in other claim(s) were submitted. " if reused else "") + "A reviewer must confirm; a repeat peril can be a genuine separate loss.", inputs=inputs)
+    return _res(code, name, "PASS", "No duplicate claim or reused evidence found.", inputs=inputs)
+
+
+_COMMERCIAL_HINTS = ("commercial", "shop", "office", "godown", "warehouse", "guest house", "homestay", "home stay", "paying guest", "rental", "factory", "workshop", "clinic")
+
+
+def evaluate_rule_usage_change(policy, claim, modifications, prop):
+    code, name = "RULE-USAGE-CHANGE-01", "Property Usage Change Check"
+    pend = _unverified(code, name, policy, "the insured usage")
+    if pend:
+        return pend
+    usage = (_terms(policy).get("insured_usage") or "").strip()
+    if not usage:
+        return _res(code, name, "INCONCLUSIVE", "No insured usage is recorded in the verified policy terms.")
+    texts = [prop.property_type or ""] if prop else []
+    if claim:
+        texts.append(claim.description or "")
+    texts += [(m.suspected_category or "") + " " + (m.description or "") for m in modifications]
+    blob = " ".join(texts).lower()
+    insured_commercial = any(h in usage.lower() for h in _COMMERCIAL_HINTS)
+    hints = [h for h in _COMMERCIAL_HINTS if h in blob]
+    inputs = {"insured_usage": usage, "registered_type": prop.property_type if prop else None, "indicators": hints}
+    if hints and not insured_commercial:
+        return _res(code, name, "MORE_EVIDENCE_REQUIRED", f"Records suggest non-residential use ({', '.join(hints)}) while the policy insures '{usage}'. Request an occupancy declaration; a reviewer decides whether this is material.", inputs=inputs)
+    return _res(code, name, "PASS", "No indication of a usage different from the insured usage.", inputs=inputs)
+
+
+def _has_permit(m, decl_by_mod):
+    d = decl_by_mod.get(m.id, [])
+    return any(x.permit_number for x in d) or any(e.category == "Building Permit" for e in m.evidence_items)
+
+
+def _aggregate(code, name, rows):
+    if not rows:
+        return None
+    worst = max(rows, key=lambda r: _SEVERITY[r["result"]])
+    worst["inputs"] = {**worst.get("inputs", {}), "modifications_evaluated": [r["inputs"].get("modification_alert_id") for r in rows]}
+    return worst
+
+
+def evaluate_rule_permit_verify(modifications, decl_by_mod):
+    code, name = "RULE-PERMIT-VERIFY-01", "Construction Permit Verification"
+    rows = []
+    for m in modifications:
+        if m.status in ("Not Confirmed", "Closed"):
+            continue
+        if not any(k in (m.suspected_category or "").lower() for k in _CONSTRUCTION):
+            continue
+        ok = _has_permit(m, decl_by_mod)
+        inp = {"modification_alert_id": m.modification_alert_id, "category": m.suspected_category, "permit_on_record": ok, "status": m.status}
+        rows.append(_res(code, name, "PASS" if ok else "MORE_EVIDENCE_REQUIRED",
+                         f"{m.modification_alert_id}: permit on record." if ok else
+                         f"{m.modification_alert_id} ({m.suspected_category}): no permit on record. Request the building permit/completion certificate; absence of a permit does not by itself decide the claim.", inputs=inp))
+    return _aggregate(code, name, rows) or _res(code, name, "INCONCLUSIVE", "No construction-type modification alerts on this property.")
+
+
+def evaluate_rule_undeclared_modification(policy, modifications, decl_by_mod):
+    code, name = "RULE-MOD-UNDECLARED-01", "Undeclared Modification Check"
+    clause = next((c for c in (_terms(policy).get("conditions") or []) if re.search(r"alteration|material\s+change|disclos", c, re.I)), None) if policy.terms_verified else None
+    rows = []
+    for m in modifications:
+        if m.status in ("Not Confirmed", "Closed"):
+            continue
+        decls = decl_by_mod.get(m.id, [])
+        inp = {"modification_alert_id": m.modification_alert_id, "declarations": len(decls), "status": m.status}
+        if decls:
+            rows.append(_res(code, name, "PASS", f"{m.modification_alert_id}: owner declaration on file.", clause, inp))
+        else:
+            rows.append(_res(code, name, "MORE_EVIDENCE_REQUIRED", f"{m.modification_alert_id} ({m.suspected_category}) has no owner declaration. Request disclosure from the owner. A modification does not by itself invalidate or reduce a claim; only a verified policy condition applied by a reviewer can.", clause, inp))
+    return _aggregate(code, name, rows) or _res(code, name, "PASS", "No open modification alerts on this property.")
+
+
 def run_policy_rules_pipeline(
     db: Session,
     policy_id: int,
@@ -753,6 +1009,13 @@ def run_policy_rules_pipeline(
             declaration = db.query(OwnerDeclaration).filter(OwnerDeclaration.modification_id == mod_rec.id).first()
 
     ci = custom_inputs or {}
+    prop = policy.property
+    all_mods = db.query(Modification).filter(Modification.property_id == policy.property_id).all()
+    decl_by_mod: Dict[int, list] = {}
+    for d in db.query(OwnerDeclaration).filter(OwnerDeclaration.property_id == policy.property_id).all():
+        if d.modification_id:
+            decl_by_mod.setdefault(d.modification_id, []).append(d)
+    rule_cfg = {r.rule_code: (r.rule_config or {}) for r in db.query(PolicyRule).all()}
 
     rule_evaluators = [
         ("RULE-POL-PERIOD-01", "Policy Effective Period & Incident Date Verification", lambda: PolicyRulesEngine.evaluate_rule_pol_period(
@@ -775,7 +1038,16 @@ def run_policy_rules_pipeline(
         )),
         ("RULE-DECLARATION-TIMELY-01", "Owner Material Alteration Declaration Rule", lambda: PolicyRulesEngine.evaluate_rule_declaration_timely(
             policy, modification, declaration
-        ))
+        )),
+        ("RULE-PERIL-INSURED-01", "Insured Event (Named Peril) Check", lambda: evaluate_rule_peril_insured(policy, claim, ci.get("cause_of_loss"))),
+        ("RULE-EXCL-GENERAL-01", "Policy Exclusion Screening", lambda: evaluate_rule_general_exclusions(policy, claim, ci.get("cause_of_loss"))),
+        ("RULE-SUBLIMIT-01", "Sub-limit Application", lambda: evaluate_rule_sublimit(policy, claim, ci.get("loss_items"))),
+        ("RULE-UNDERINS-01", "Underinsurance (Average Clause) Check", lambda: evaluate_rule_underinsurance(policy, claim)),
+        ("RULE-DUP-CLAIM-01", "Duplicate Claim Screening", lambda: evaluate_rule_duplicate_claim(
+            db, policy, claim, int(rule_cfg.get("RULE-DUP-CLAIM-01", {}).get("window_days", 30)))),
+        ("RULE-USAGE-CHANGE-01", "Property Usage Change Check", lambda: evaluate_rule_usage_change(policy, claim, all_mods, prop)),
+        ("RULE-PERMIT-VERIFY-01", "Construction Permit Verification", lambda: evaluate_rule_permit_verify(all_mods, decl_by_mod)),
+        ("RULE-MOD-UNDECLARED-01", "Undeclared Modification Check", lambda: evaluate_rule_undeclared_modification(policy, all_mods, decl_by_mod)),
     ]
 
     executions = []

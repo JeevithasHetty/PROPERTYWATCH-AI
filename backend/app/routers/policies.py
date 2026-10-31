@@ -12,10 +12,12 @@ from sqlalchemy import desc
 
 from app.database import get_db
 from app.config import settings
+from pydantic import BaseModel
 from app.models import (
     InsurancePolicy, PolicyVersion, PolicyRule, PolicyRuleExecution, Property,
-    User, AuditLog, Claim, Modification
+    User, AuditLog, Claim, Modification, PolicyClause
 )
+from app.services import policy_document_service as pds
 from app.schemas import (
     PolicyCreate, PolicyUpdate, PolicyOut, PolicyVersionOut,
     PolicyRuleOut, PolicyRuleUpdate, PolicyRuleExecutionOut, PolicyRuleEvaluationRequest,
@@ -221,7 +223,11 @@ def update_policy_terms(
     if req.deductibles is not None: pol.deductibles = req.deductibles
     if req.exclusions is not None: pol.exclusions = req.exclusions
     if req.endorsements is not None: pol.endorsements = req.endorsements
-    if req.terms_verified is not None: pol.terms_verified = req.terms_verified
+    terms_changed = any(v is not None for v in (req.coverage_limits, req.deductibles, req.exclusions, req.endorsements))
+    if req.terms_verified is not None:
+        pol.terms_verified = req.terms_verified
+    elif terms_changed:
+        pol.terms_verified = False  # edited terms must be re-verified by a human
     if req.notes: pol.notes = req.notes
     pol.updated_at = datetime.datetime.utcnow()
 
@@ -255,6 +261,27 @@ def update_policy_terms(
         p_out.property_address = pol.property.address
     return p_out
 
+def _run_extraction(db: Session, pol: InsurancePolicy, contents: bytes, content_type: str, sha256: str) -> dict:
+    """Extract text + clauses from a PDF. Clauses are suggestions that need human verification."""
+    if content_type != "application/pdf":
+        return {"extraction_status": "UNAVAILABLE",
+                "message": "Automatic extraction supports PDF files only. Enter terms manually and verify them."}
+    res = pds.extract_pdf_pages(contents)
+    pages = res["pages"]
+    if not any(p.strip() for p in pages):
+        return {"extraction_status": "NO_TEXT", "method": res["method"], "warnings": res["warnings"],
+                "message": "No readable text found. Scanned policies need OCR (tesseract) or manual entry."}
+    # drop un-reviewed suggestions from earlier documents; keep Verified/Rejected history
+    db.query(PolicyClause).filter(PolicyClause.policy_id == pol.id, PolicyClause.status == "Extracted").delete()
+    clauses = pds.identify_clauses(pages)
+    for c in clauses:
+        db.add(PolicyClause(policy_id=pol.id, document_hash=sha256, **c))
+    return {"extraction_status": "COMPLETED_NEEDS_HUMAN_VERIFICATION", "method": res["method"],
+            "pages": len(pages), "clauses_found": len(clauses), "header_suggestions": pds.header_fields(pages),
+            "warnings": res["warnings"],
+            "message": "Clauses were identified automatically and are NOT verified. Review each clause, then apply."}
+
+
 @router.post("/{policy_id}/document", response_model=PolicyOut)
 async def upload_policy_document(
     policy_id: int,
@@ -283,10 +310,7 @@ async def upload_policy_document(
     with open(dest_path, "wb") as f:
         f.write(contents)
 
-    extracted = {
-        "extraction_status": "UNAVAILABLE",
-        "message": "No PDF text extraction or OCR provider is configured; terms must be entered and verified by an authorized reviewer."
-    }
+    extracted = _run_extraction(db, pol, contents, content_type, sha256)
 
     pol.document_path = unique_name
     pol.document_filename = filename
@@ -390,6 +414,16 @@ def verify_policy_terms(
     if "exclusions" in vt: pol.exclusions = vt["exclusions"]
     if "endorsements" in vt: pol.endorsements = vt["endorsements"]
     if "policy_type" in vt: pol.policy_type = vt["policy_type"]
+    if "structured_terms" in vt:
+        st = vt["structured_terms"]
+        if not isinstance(st, dict):
+            raise HTTPException(status_code=400, detail="structured_terms must be a JSON object.")
+        for key in ("sum_insured", "reinstatement_value"):
+            if st.get(key) is not None and (not isinstance(st[key], (int, float)) or st[key] < 0):
+                raise HTTPException(status_code=400, detail=f"{key} must be a non-negative number.")
+        if not isinstance(st.get("sub_limits", {}), dict) or not isinstance(st.get("insured_perils", []), list):
+            raise HTTPException(status_code=400, detail="sub_limits must be an object and insured_perils an array.")
+        pol.structured_terms = st
     if pol.effective_date >= pol.expiry_date:
         raise HTTPException(status_code=400, detail="Effective date must precede expiry date.")
 
@@ -561,3 +595,143 @@ def get_rule_execution_history(
         query = query.filter(PolicyRuleExecution.modification_id == modification_id)
 
     return query.order_by(desc(PolicyRuleExecution.execution_timestamp)).all()
+
+
+# ----------------------------------------------------------------------------- clause review workflow
+class ClauseReview(BaseModel):
+    status: str  # Verified | Rejected | Extracted
+    text: Optional[str] = None
+    extracted_values: Optional[dict] = None
+    category: Optional[str] = None
+    reviewer_note: Optional[str] = None
+
+
+class ApplyClauses(BaseModel):
+    confirm_terms_verified: bool = False
+    verification_notes: Optional[str] = None
+
+
+def _clause_dict(c: PolicyClause) -> dict:
+    return {
+        "id": c.id, "policy_id": c.policy_id, "page_number": c.page_number, "clause_ref": c.clause_ref,
+        "category": c.category, "text": c.text, "extracted_values": c.extracted_values, "status": c.status,
+        "verified_by_user_id": c.verified_by_user_id,
+        "verified_at": c.verified_at.isoformat() if c.verified_at else None,
+        "reviewer_note": c.reviewer_note,
+    }
+
+
+@router.post("/{policy_id}/clauses/extract")
+def rerun_clause_extraction(
+    policy_id: int, db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin", "reviewer"]))
+):
+    """Re-run PDF text extraction + clause identification on the stored policy document."""
+    pol = db.query(InsurancePolicy).filter(InsurancePolicy.id == policy_id).first()
+    if not pol:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    if not pol.document_path or not (settings.UPLOADS_DIR / pol.document_path).is_file():
+        raise HTTPException(status_code=409, detail="No stored policy document to extract from.")
+    path = settings.UPLOADS_DIR / pol.document_path
+    ctype = "application/pdf" if path.suffix.lower() == ".pdf" else "application/octet-stream"
+    info = _run_extraction(db, pol, path.read_bytes(), ctype, pol.document_hash or "")
+    pol.extracted_terms = info
+    db.add(AuditLog(user_id=current_user.id, entity_type="Policy", entity_id=pol.policy_number,
+                    action="POLICY_CLAUSES_EXTRACTED", new_state=info, timestamp=datetime.datetime.utcnow()))
+    db.commit()
+    return info
+
+
+@router.get("/{policy_id}/clauses")
+def list_policy_clauses(
+    policy_id: int, status_filter: Optional[str] = Query(None, alias="status"),
+    db: Session = Depends(get_db), current_user: User = Depends(get_current_user)
+):
+    pol = db.query(InsurancePolicy).filter(InsurancePolicy.id == policy_id).first()
+    if not pol:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    _require_policy_access(pol, current_user)
+    q = db.query(PolicyClause).filter(PolicyClause.policy_id == policy_id)
+    if status_filter:
+        q = q.filter(PolicyClause.status == status_filter)
+    return [_clause_dict(c) for c in q.order_by(PolicyClause.page_number, PolicyClause.id).all()]
+
+
+@router.put("/{policy_id}/clauses/{clause_id}")
+def review_policy_clause(
+    policy_id: int, clause_id: int, req: ClauseReview, db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin", "reviewer"]))
+):
+    """Human verification of one extracted clause (verify, correct values, or reject)."""
+    if req.status not in ("Verified", "Rejected", "Extracted"):
+        raise HTTPException(status_code=400, detail="status must be Verified, Rejected or Extracted.")
+    c = db.query(PolicyClause).filter(PolicyClause.id == clause_id, PolicyClause.policy_id == policy_id).first()
+    if not c:
+        raise HTTPException(status_code=404, detail="Clause not found")
+    if req.text is not None:
+        c.text = req.text
+    if req.category is not None:
+        c.category = req.category
+    if req.extracted_values is not None:
+        c.extracted_values = req.extracted_values
+    c.status = req.status
+    c.reviewer_note = req.reviewer_note
+    c.verified_by_user_id = current_user.id if req.status != "Extracted" else None
+    c.verified_at = datetime.datetime.utcnow() if req.status != "Extracted" else None
+    db.add(AuditLog(user_id=current_user.id, entity_type="PolicyClause", entity_id=str(c.id),
+                    action=f"POLICY_CLAUSE_{req.status.upper()}", new_state=_clause_dict(c),
+                    timestamp=datetime.datetime.utcnow()))
+    db.commit()
+    return _clause_dict(c)
+
+
+@router.post("/{policy_id}/clauses/apply", response_model=PolicyOut)
+def apply_verified_clauses(
+    policy_id: int, req: ApplyClauses, db: Session = Depends(get_db),
+    current_user: User = Depends(require_roles(["admin", "reviewer"]))
+):
+    """
+    Merge reviewer-VERIFIED clauses into the policy's terms (new PolicyVersion). Unverified clauses are ignored.
+    The policy only becomes terms_verified when confirm_terms_verified is true.
+    """
+    pol = db.query(InsurancePolicy).filter(InsurancePolicy.id == policy_id).first()
+    if not pol:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    clauses = db.query(PolicyClause).filter(PolicyClause.policy_id == policy_id,
+                                            PolicyClause.status == "Verified").all()
+    if not clauses:
+        raise HTTPException(status_code=409, detail="No verified clauses to apply. Verify clauses first.")
+    terms = pds.terms_from_verified_clauses(clauses)
+    pol.coverage_limits = {**(pol.coverage_limits or {}), **terms["coverage_limits"]}
+    pol.deductibles = {**(pol.deductibles or {}), **terms["deductibles"]}
+    pol.exclusions = list(dict.fromkeys([*(pol.exclusions or []), *terms["exclusions"]]))
+    pol.endorsements = list(dict.fromkeys([*(pol.endorsements or []), *terms["endorsements"]]))
+    old = dict(pol.structured_terms or {})
+    new = terms["structured_terms"]
+    old["sub_limits"] = {**old.get("sub_limits", {}), **new["sub_limits"]}
+    old["insured_perils"] = list(dict.fromkeys([*old.get("insured_perils", []), *new["insured_perils"]]))
+    old["conditions"] = list(dict.fromkeys([*old.get("conditions", []), *new["conditions"]]))
+    for k in ("sum_insured", "reinstatement_value", "insured_usage", "average_clause"):
+        if k in new:
+            old[k] = new[k]
+    pol.structured_terms = old
+    pol.terms_verified = bool(req.confirm_terms_verified)
+    pol.updated_at = datetime.datetime.utcnow()
+    db.add(PolicyVersion(
+        policy_id=pol.id, version_number=len(pol.versions) + 1,
+        terms_snapshot={"coverage_limits": pol.coverage_limits, "deductibles": pol.deductibles,
+                        "exclusions": pol.exclusions, "endorsements": pol.endorsements,
+                        "structured_terms": pol.structured_terms, "terms_verified": pol.terms_verified,
+                        "verified_clause_ids": [c.id for c in clauses]},
+        change_reason=f"Verified clauses applied. {req.verification_notes or ''}".strip(),
+        changed_by_user_id=current_user.id))
+    db.add(AuditLog(user_id=current_user.id, entity_type="Policy", entity_id=pol.policy_number,
+                    action="POLICY_CLAUSES_APPLIED", new_state={"clauses": len(clauses),
+                                                                "terms_verified": pol.terms_verified},
+                    timestamp=datetime.datetime.utcnow()))
+    db.commit()
+    db.refresh(pol)
+    out = PolicyOut.model_validate(pol)
+    if pol.property:
+        out.property_reference, out.property_address = pol.property.property_reference, pol.property.address
+    return out
