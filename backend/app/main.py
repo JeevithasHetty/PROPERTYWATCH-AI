@@ -15,7 +15,7 @@ from app.routers import (
     auth, properties, geocoding, satellite, analysis,
     modifications, evidence, authenticity, reviews, reports,
     settings as settings_router, audit,
-    policies, claims, evaluations, decisions, declarations, models_registry
+    policies, claims, evaluations, decisions, declarations, models_registry, monitoring
 )
 
 # Configure logging
@@ -34,7 +34,10 @@ async def lifespan(app: FastAPI):
         logger.info("Database and AI services initialization completed successfully.")
     except Exception as e:
         logger.error(f"Error during application startup initialization: {e}")
+    from app.services.monitoring_service import start_scheduler, stop_scheduler
+    start_scheduler()
     yield
+    stop_scheduler()
     # Shutdown
     logger.info("PropertyWatch AI backend shutting down.")
 
@@ -94,6 +97,7 @@ app.include_router(evaluations.router, prefix=api_prefix)
 app.include_router(decisions.router, prefix=api_prefix)
 app.include_router(declarations.router, prefix=api_prefix)
 app.include_router(models_registry.router, prefix=api_prefix)
+app.include_router(monitoring.router, prefix=api_prefix)
 
 @app.get("/")
 def root():
