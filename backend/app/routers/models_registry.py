@@ -9,6 +9,7 @@ from app.config import settings
 from app.models import AIModelRegistry, ModelInference, PropertySnapshot, Property
 from app.schemas import AIModelRegistryOut, ModelInferenceOut
 from app.auth import get_current_user, require_roles
+from app.services.paths import snapshot_fs_path
 from app.services.ai_models_service import (
     init_ai_model_registry, levir_cd_detector, rooftop_object_detector
 )
@@ -95,8 +96,8 @@ def run_building_change_detection(
     if current_user.role == "owner" and prop.owner_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied. You do not own this property.")
 
-    base_path = str(settings.ROOT_DIR / base_snap.image_path.lstrip("/")) if base_snap.image_path.startswith("/") else base_snap.image_path
-    comp_path = str(settings.ROOT_DIR / comp_snap.image_path.lstrip("/")) if comp_snap.image_path.startswith("/") else comp_snap.image_path
+    base_path = str(snapshot_fs_path(base_snap))
+    comp_path = str(snapshot_fs_path(comp_snap))
 
     result = levir_cd_detector.detect_building_changes(base_path, comp_path, req.property_id)
     return result
@@ -122,6 +123,6 @@ def run_rooftop_object_detection(
     if current_user.role == "owner" and prop.owner_user_id != current_user.id:
         raise HTTPException(status_code=403, detail="Access denied. You do not own this property.")
 
-    img_path = str(settings.ROOT_DIR / snap.image_path.lstrip("/")) if snap.image_path.startswith("/") else snap.image_path
+    img_path = str(snapshot_fs_path(snap))
     result = rooftop_object_detector.detect_rooftop_objects(img_path, req.property_id)
     return result
