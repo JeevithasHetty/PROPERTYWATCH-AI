@@ -119,15 +119,16 @@ const SettingsPage = () => {
               <MapPin size={18} color="#6ee7a8" />
               <h4 style={{ fontSize: '0.95rem', fontWeight: 700 }}>Address lookup and maps</h4>
             </div>
-            <span className="badge badge-green">Operational</span>
+            <span className="badge badge-green">{statusData.geocoding.status}</span>
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.82rem' }}>
             <div><b>Provider:</b> {statusData.geocoding.provider}</div>
+            <div><b>Region filter:</b> India only (countrycodes={statusData.geocoding.countrycodes})</div>
             <div><b>Policy Compliance:</b> {statusData.geocoding.rate_limit_compliance}</div>
             <div><b>Interactive Map Engine:</b> {statusData.geocoding.map_engine || 'Leaflet + OpenStreetMap Cartographic Tiles'}</div>
             <div><b>Local Caching:</b> {statusData.geocoding.caching_active ? 'Active (In-memory & SQLite)' : 'Disabled'}</div>
-            <div><b>Fallback Mode:</b> Offline deterministic coordinates fallback active</div>
+            <div><b>Mode:</b> {statusData.geocoding.mode}</div>
           </div>
         </div>
 
@@ -142,12 +143,12 @@ const SettingsPage = () => {
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.82rem' }}>
-            <div><b>Project Name:</b> {statusData.satellite_service.gee_project_name || 'youtube-1'}</div>
-            <div><b>Project ID:</b> {statusData.satellite_service.gee_project_id || 'youtube-1-476010'}</div>
-            <div><b>Project Number:</b> {statusData.satellite_service.gee_project_number || '741309446381'}</div>
-            <div><b>Image Collection:</b> {statusData.satellite_service.dataset || 'COPERNICUS/S2_SR_HARMONIZED'}</div>
-            <div><b>Resolution:</b> {statusData.satellite_service.resolution || '10 meters per pixel'}</div>
-            <div><b>Python API:</b> {statusData.satellite_service.earthengine_api || 'Installed (earthengine-api)'}</div>
+            <div><b>Active provider:</b> {statusData.satellite_service.active_provider || 'none'}</div>
+            <div><b>Copernicus credentials:</b> {statusData.satellite_service.copernicus_configured ? 'configured' : 'missing (COPERNICUS_CLIENT_ID / SECRET)'}</div>
+            <div><b>Google Earth Engine:</b> {statusData.satellite_service.gee_configured ? 'configured' : `missing: ${(statusData.satellite_service.gee_missing || []).join(', ')}`}</div>
+            <div><b>Dataset:</b> {statusData.satellite_service.dataset}</div>
+            <div><b>Resolution:</b> {statusData.satellite_service.resolution}</div>
+            {statusData.satellite_service.synthetic_imagery_possible && <div style={{ color: '#fbbf24' }}><b>Demo mode:</b> images may be synthetic and are labelled DEMO.</div>}
           </div>
         </div>
 
@@ -210,21 +211,21 @@ const SettingsPage = () => {
       <div className="glass-panel" style={{ padding: '24px' }}>
         <h3 style={{ fontSize: '1.05rem', fontWeight: 700, marginBottom: '10px', display: 'flex', alignItems: 'center', gap: '8px' }}>
           <Info size={18} color="#6ee7a8" />
-          <span>Google Earth Engine (GEE) & External API Configuration</span>
+          <span>Satellite &amp; external API configuration</span>
         </h3>
         <p style={{ fontSize: '0.86rem', color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: '14px' }}>
-          PropertyWatch AI is configured for Google Earth Engine under Project ID <b>youtube-1-476010</b> (Project # <b>741309446381</b>, Project Name <b>youtube-1</b>).
-          To authenticate interactive GEE access locally or in production, run <code>earthengine authenticate</code> or configure your service account in your backend <code>.env</code> file:
+          Live imagery needs credentials in the backend <code>.env</code> file (never in the browser). Use Copernicus Data Space (free) or Google Earth Engine with your own project and service account:
         </p>
 
         <div style={{ background: '#070b14', padding: '14px 18px', borderRadius: '8px', border: '1px solid var(--border-subtle)', fontFamily: 'var(--font-mono)', fontSize: '0.8rem', color: '#6ee7a8' }}>
-          GEE_PROJECT_ID=youtube-1-476010<br/>
-          GEE_PROJECT_NUMBER=741309446381<br/>
-          GEE_PROJECT_NAME=youtube-1<br/>
-          NOMINATIM_USER_AGENT=PropertyWatchAI-App/1.0 (contact: info@propertywatch.ai)<br/>
-          DEMO_MODE=true<br/>
-          AUTHENTICITY_API_KEY=your_optional_authenticity_key<br/>
-          LLM_API_KEY=your_optional_openai_or_anthropic_key
+          COPERNICUS_CLIENT_ID=&lt;your OAuth client id&gt;<br/>
+          COPERNICUS_CLIENT_SECRET=&lt;your OAuth client secret&gt;<br/>
+          # optional Earth Engine<br/>
+          GEE_PROJECT_ID=&lt;your project&gt;<br/>
+          GEE_SERVICE_ACCOUNT_EMAIL=&lt;service account&gt;<br/>
+          GEE_SERVICE_ACCOUNT_KEY=&lt;path to key json&gt;<br/>
+          NOMINATIM_USER_AGENT=PropertyWatchAI/1.0 (your real contact)<br/>
+          DEMO_MODE=false
         </div>
       </div>
     </div>

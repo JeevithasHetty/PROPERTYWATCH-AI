@@ -4,8 +4,8 @@ import { useAuth } from '../context/AuthContext';
 import { Eye, Lock, Mail, AlertCircle, ArrowRight } from 'lucide-react';
 
 const LoginPage = () => {
-  const [email, setEmail] = useState('admin@propertywatch.ai');
-  const [password, setPassword] = useState('AdminPass123!');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();

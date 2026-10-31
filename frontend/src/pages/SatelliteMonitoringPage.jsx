@@ -255,6 +255,9 @@ const SatelliteMonitoringPage = () => {
               <Info size={12} />
               {searchResults[0].mode}
             </span>
+            {searchResults[0].data_origin === 'DEMO_SYNTHETIC' && (
+              <span className="badge badge-amber" style={{ marginLeft: 8 }}>DEMO: synthetic images, not real satellite data</span>
+            )}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '16px' }}>

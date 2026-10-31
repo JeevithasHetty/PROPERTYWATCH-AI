@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Download, FileText, RefreshCw, ShieldCheck, Upload } from 'lucide-react';
 import apiClient from '../api/client';
+import { formatINR } from '../utils/format';
 import { useAuth } from '../context/AuthContext';
 import StatusBadge from '../components/StatusBadge';
 
@@ -185,6 +186,19 @@ const ClaimsPage = () => {
     }
   };
 
+  const [settle, setSettle] = useState({ settled_amount: '', payment_mode: 'NEFT', payment_reference: '' });
+  const submitSettlement = async (event) => {
+    event.preventDefault();
+    try {
+      await apiClient.settleClaim(selected.id, { ...settle, settled_amount: Number(settle.settled_amount) });
+      setMessage('Payment recorded.');
+      setSettle({ settled_amount: '', payment_mode: 'NEFT', payment_reference: '' });
+      await refreshSelected();
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Unable to record settlement.');
+    }
+  };
+
   const submitDeclaration = async (event) => {
     event.preventDefault();
     try {
@@ -274,7 +288,7 @@ const ClaimsPage = () => {
 
             <div className="glass-panel" style={panelStyle}>
               <h3>What happened</h3>
-              <p>{selected.incident_date?.slice(0, 10)} · {selected.reported_cause} · Estimated cost: ${Number(selected.estimated_loss).toLocaleString()}</p>
+              <p>{selected.incident_date?.slice(0, 10)} · {selected.reported_cause} · Estimated cost: {formatINR(selected.estimated_loss)}</p>
               <p>{selected.description}</p>
             </div>
 
@@ -394,10 +408,22 @@ const ClaimsPage = () => {
               </form>
             )}
 
+            {canDecide && ['Approved', 'Partially Approved'].includes(selected.status) && (
+              <form className="glass-panel" style={panelStyle} onSubmit={submitSettlement}>
+                <h3>Record settlement payment</h3>
+                <label>Amount paid (₹)<input className="form-input" style={inputStyle} type="number" min="0" step="0.01" required value={settle.settled_amount} onChange={(e) => setSettle({ ...settle, settled_amount: e.target.value })} /></label>
+                <select className="form-input" value={settle.payment_mode} onChange={(e) => setSettle({ ...settle, payment_mode: e.target.value })}>
+                  {['NEFT', 'RTGS', 'UPI', 'IMPS', 'CHEQUE'].map((m) => <option key={m} value={m}>{m}</option>)}
+                </select>
+                <input className="form-input" style={inputStyle} required minLength={3} value={settle.payment_reference} onChange={(e) => setSettle({ ...settle, payment_reference: e.target.value })} placeholder="UTR / cheque number" />
+                <button className="btn btn-primary" style={{ marginTop: 10 }} type="submit">Record payment</button>
+              </form>
+            )}
+
             <details className="glass-panel" style={panelStyle}>
               <summary>Review notes and claim history</summary>
               {(selected.rule_executions || []).map((rule) => <p key={rule.id}>Policy check: <b>{rule.result.replaceAll('_', ' ').toLowerCase()}</b> — {rule.explanation}</p>)}
-              {(selected.calculations || []).map((item) => <p key={item.id}>Early estimate: ${Number(item.provisional_net_payout).toLocaleString()}</p>)}
+              {(selected.calculations || []).map((item) => <p key={item.id}>Early estimate: {formatINR(item.provisional_net_payout)}</p>)}
               {(selected.recommendations || []).map((item) => <p key={item.id}>Reviewer suggestion: {item.reasoning}</p>)}
               {(selected.decisions || []).map((item) => <p key={item.id}>Final decision: {item.decision.replaceAll('_', ' ').toLowerCase()} — {item.rationale}</p>)}
               {(selected.status_history || []).map((item) => <p key={item.id}>{item.timestamp?.slice(0, 19)} · {item.from_status.replaceAll('_', ' ')} → {item.to_status.replaceAll('_', ' ')}</p>)}

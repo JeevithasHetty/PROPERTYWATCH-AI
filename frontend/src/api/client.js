@@ -118,8 +118,25 @@ export const apiClient = {
   downloadClaimReport: (id) =>
     api.get(`/reports/claims/${id}`, { responseType: 'blob' }),
 
+  settleClaim: (id, data) => api.post(`/claims/${id}/settlement`, data),
+
+  // Policy clause extraction & human verification
+  extractPolicyClauses: (policyId) => api.post(`/policies/${policyId}/clauses/extract`),
+  getPolicyClauses: (policyId, status) => api.get(`/policies/${policyId}/clauses`, { params: { status } }),
+  reviewPolicyClause: (policyId, clauseId, data) => api.put(`/policies/${policyId}/clauses/${clauseId}`, data),
+  applyPolicyClauses: (policyId, data) => api.post(`/policies/${policyId}/clauses/apply`, data),
+
+  // Automated monitoring & satellite status
+  getSatelliteStatus: () => api.get('/satellite/status'),
+  getMonitoringStatus: () => api.get('/monitoring/status'),
+  getMonitoringRuns: (params) => api.get('/monitoring/runs', { params }),
+  runMonitoring: (propertyIds) => api.post('/monitoring/run', { property_ids: propertyIds || null }),
+
+  // Notifications
+  getNotifications: () => api.get('/notifications'),
+
   // Settings
-  getSettingsStatus: () => api.get('/settings/status'),
+  getSettingsStatus: (probe = false) => api.get('/settings/status', { params: { probe } }),
   toggleDemoMode: () => api.post('/settings/toggle-demo'),
 
   // Audit & Dashboard
