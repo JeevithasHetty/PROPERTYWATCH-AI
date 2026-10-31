@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
+from app.services.format_utils import format_inr
 from app.database import get_db
 from app.config import settings
 from app.models import (
@@ -134,6 +135,7 @@ def register_claim(
         reported_cause=claim_in.reported_cause,
         description=claim_in.description,
         estimated_loss=claim_in.estimated_loss,
+        loss_items=claim_in.loss_items,
         status="Submitted",
         created_at=datetime.datetime.utcnow(),
         updated_at=datetime.datetime.utcnow()
@@ -178,7 +180,7 @@ def register_claim(
         notif = Notification(
             user_id=ar.id,
             title="New Insurance Claim Submitted",
-            message=f"Claim {claim.claim_reference} submitted for {prop.property_reference} ({claim.reported_cause}, ${claim.estimated_loss:,.2f}).",
+            message=f"Claim {claim.claim_reference} submitted for {prop.property_reference} ({claim.reported_cause}, {format_inr(claim.estimated_loss)}).",
             type="CLAIM_STATUS_UPDATE",
             link=f"/claims/{claim.id}",
             created_at=datetime.datetime.utcnow()
@@ -241,10 +243,18 @@ def update_claim_status(
         "Submitted", "Under Evaluation", "Information Requested",
         "Inspection Requested", "Inspection Ordered", "Provisional Calculation Ready",
         "Recommendation Recorded", "Decision Recorded", "Approved",
-        "Partially Approved", "Denied", "Closed"
+        "Partially Approved", "Denied", "Settled", "Closed"
     }
     if req.to_status not in allowed_statuses:
         raise HTTPException(status_code=400, detail="Invalid claim status.")
+    # Outcome statuses are only reachable through the dedicated, role-gated endpoints so that
+    # no reviewer shortcut or automation can approve, deny or settle a claim.
+    if req.to_status in {"Approved", "Partially Approved", "Denied", "Decision Recorded", "Settled",
+                         "Provisional Calculation Ready", "Recommendation Recorded"}:
+        raise HTTPException(status_code=400, detail=f"'{req.to_status}' can only be set via the decision/settlement/"
+                                                    "calculation/recommendation endpoints.")
+    if claim.status in {"Settled", "Denied"}:
+        raise HTTPException(status_code=409, detail=f"Claim is {claim.status}; its status can no longer be changed.")
 
     from_st = claim.status
     claim.status = req.to_status
