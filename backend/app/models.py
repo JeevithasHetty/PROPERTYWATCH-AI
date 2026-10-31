@@ -45,6 +45,7 @@ class Property(Base):
     built_up_area = Column(Float, nullable=True) # in sq ft / sq meters
     reference_policy_number = Column(String(100), nullable=True, index=True) # for recordkeeping / quick reference
     monitoring_enabled = Column(Boolean, default=True)
+    is_demo = Column(Boolean, default=False)
     baseline_image_url = Column(String(300), nullable=True)
     last_monitoring_date = Column(DateTime, nullable=True)
     notes = Column(Text, nullable=True)
@@ -99,6 +100,9 @@ class InsurancePolicy(Base):
     document_filename = Column(String(200), nullable=True)
     document_hash = Column(String(64), nullable=True)
     extracted_terms = Column(JSON, nullable=True)
+    # Verified structured terms: insured_perils, sub_limits, sum_insured, reinstatement_value,
+    # average_clause, insured_usage, claim_duplicate_window_days, ...
+    structured_terms = Column(JSON, nullable=True)
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
@@ -178,6 +182,8 @@ class PropertySnapshot(Base):
     capture_metadata = Column(JSON, nullable=True) # resolution, sensor, sun angle, coordinates
     cloud_coverage = Column(Float, default=0.0)
     is_baseline = Column(Boolean, default=False)
+    # SATELLITE_LIVE (real provider imagery) | DEMO_SYNTHETIC (generated) | USER_UPLOAD
+    data_origin = Column(String(30), default="USER_UPLOAD", index=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     # Relationships
@@ -402,6 +408,7 @@ class Claim(Base):
     reported_cause = Column(String(100), nullable=False) # Severe Windstorm & Hail, Roof Collapse, Tree Impact, Water Intrusion, Fire, Structural Damage
     description = Column(Text, nullable=False)
     estimated_loss = Column(Float, nullable=False)
+    loss_items = Column(JSON, nullable=True)  # [{"category": str, "amount": float}]
     status = Column(String(50), default="Submitted", index=True) # Submitted, Under Evaluation, Information Requested, Provisional Calculation Ready, Recommendation Recorded, Decision Recorded, Closed
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
@@ -573,3 +580,38 @@ class AuditLog(Base):
 
     # Relationships
     user = relationship("User", back_populates="audit_logs")
+
+
+class PolicyClause(Base):
+    """A clause identified in an uploaded policy PDF. Only reviewer-verified clauses feed policy terms."""
+    __tablename__ = "policy_clauses"
+
+    id = Column(Integer, primary_key=True, index=True)
+    policy_id = Column(Integer, ForeignKey("insurance_policies.id"), nullable=False, index=True)
+    document_hash = Column(String(64), nullable=True)
+    page_number = Column(Integer, nullable=True)
+    clause_ref = Column(String(50), nullable=True)
+    category = Column(String(40), nullable=False, index=True)  # sum_insured, insured_peril, exclusion, sub_limit, deductible, condition, endorsement, usage, other
+    text = Column(Text, nullable=False)
+    extracted_values = Column(JSON, nullable=True)
+    status = Column(String(20), default="Extracted", index=True)  # Extracted, Verified, Rejected
+    verified_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    verified_at = Column(DateTime, nullable=True)
+    reviewer_note = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+
+class ClaimSettlement(Base):
+    __tablename__ = "claim_settlements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    claim_id = Column(Integer, ForeignKey("claims.id"), nullable=False, index=True)
+    decision_id = Column(Integer, ForeignKey("claim_decisions.id"), nullable=False)
+    settled_amount = Column(Float, nullable=False)
+    payment_mode = Column(String(20), nullable=False)  # NEFT, RTGS, UPI, IMPS, CHEQUE
+    payment_reference = Column(String(100), nullable=False)  # UTR / cheque number
+    payment_date = Column(DateTime, nullable=False)
+    settled_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+

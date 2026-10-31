@@ -78,6 +78,7 @@ class PropertySnapshotOut(BaseModel):
     capture_metadata: Optional[Dict[str, Any]] = None
     cloud_coverage: float
     is_baseline: bool
+    data_origin: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -112,6 +113,7 @@ class PropertyOut(BaseModel):
     built_up_area: Optional[float] = None
     reference_policy_number: Optional[str] = None
     monitoring_enabled: bool
+    is_demo: bool = False
     baseline_image_url: Optional[str] = None
     last_monitoring_date: Optional[datetime] = None
     verified_modifications_count: int = 0
@@ -138,7 +140,9 @@ class SatelliteSearchResultItem(BaseModel):
     cloud_coverage: float
     thumbnail_url: Optional[str] = None
     resolution_meters: float
-    mode: str # Live Copernicus or Demo Sentinel Hub
+    mode: str
+    data_origin: str = "SATELLITE_LIVE"
+    provider: Optional[str] = None # Live Copernicus or Demo Sentinel Hub
 
 class SatelliteRetrieveRequest(BaseModel):
     property_id: int
@@ -320,6 +324,7 @@ class PolicyOut(BaseModel):
     document_filename: Optional[str] = None
     document_hash: Optional[str] = None
     extracted_terms: Optional[Dict[str, Any]] = None
+    structured_terms: Optional[Dict[str, Any]] = None
     notes: Optional[str] = None
     property_reference: Optional[str] = None
     property_address: Optional[str] = None
@@ -431,6 +436,7 @@ class ClaimCreate(BaseModel):
     reported_cause: str # Severe Windstorm & Hail, Roof Collapse, Tree Impact, Water Intrusion, Fire, Structural Damage
     description: str = Field(..., min_length=1)
     estimated_loss: float = Field(..., ge=0)
+    loss_items: Optional[List[Dict[str, Any]]] = None
 
 class ClaimUpdate(BaseModel):
     status: Optional[str] = None
@@ -587,6 +593,7 @@ class ClaimOut(BaseModel):
     reported_cause: str
     description: str
     estimated_loss: float
+    loss_items: Optional[List[Dict[str, Any]]] = None
     status: str
     property_reference: Optional[str] = None
     property_address: Optional[str] = None
@@ -710,5 +717,6 @@ class ServiceStatusOut(BaseModel):
     policy_rules_engine: Optional[Dict[str, Any]] = None
     ai_models_registry: Optional[Dict[str, Any]] = None
     database: Dict[str, Any]
+    monitoring: Optional[Dict[str, Any]] = None
     demo_mode: bool
     last_checked: datetime
