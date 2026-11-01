@@ -22,10 +22,10 @@ const SettingsPage = () => {
   const [toggling, setToggling] = useState(false);
   const [message, setMessage] = useState(null);
 
-  const fetchStatus = async () => {
+  const fetchStatus = async (probe = false) => {
     try {
       setLoading(true);
-      const res = await apiClient.getSettingsStatus();
+      const res = await apiClient.getSettingsStatus(probe === true);
       setStatusData(res.data);
     } catch (err) {
       console.error('Failed to load settings status', err);
@@ -72,7 +72,7 @@ const SettingsPage = () => {
           </p>
         </div>
 
-        <button onClick={fetchStatus} className="btn btn-secondary">
+        <button onClick={() => fetchStatus(true)} className="btn btn-secondary">
           <RefreshCw size={15} />
           <span>Check services again</span>
         </button>
@@ -145,6 +145,7 @@ const SettingsPage = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.82rem' }}>
             <div><b>Active provider:</b> {statusData.satellite_service.active_provider || 'none'}</div>
             <div><b>Copernicus credentials:</b> {statusData.satellite_service.copernicus_configured ? 'configured' : 'missing (COPERNICUS_CLIENT_ID / SECRET)'}</div>
+            {statusData.satellite_service.probe && <div><b>Live login test:</b> {statusData.satellite_service.probe}</div>}
             <div><b>Google Earth Engine:</b> {statusData.satellite_service.gee_configured ? 'configured' : `missing: ${(statusData.satellite_service.gee_missing || []).join(', ')}`}</div>
             <div><b>Dataset:</b> {statusData.satellite_service.dataset}</div>
             <div><b>Resolution:</b> {statusData.satellite_service.resolution}</div>
