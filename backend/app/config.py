@@ -85,7 +85,11 @@ class Settings:
     MODELS_DIR: Path = Path(os.getenv("MODELS_DIR", str(ROOT_DIR.parent / "models")))
     LEVIR_CD_MODEL_PATH: str = os.getenv("LEVIR_CD_MODEL_PATH", "")
     ROOFTOP_MODEL_PATH: str = os.getenv("ROOFTOP_MODEL_PATH", "")
-    ROOFTOP_MODEL_CLASSES: str = os.getenv("ROOFTOP_MODEL_CLASSES", "solar_panel")
+    ROOFTOP_MODEL_CLASSES: str = os.getenv("ROOFTOP_MODEL_CLASSES", "solar_panel,pool")
+    # "0_1": model takes RGB in 0..1 and normalises internally (our exported BIT-CD). "-1_1": caller scales to -1..1.
+    LEVIR_CD_INPUT_RANGE: str = os.getenv("LEVIR_CD_INPUT_RANGE", "0_1")
+    # 0.25 is the confidence the rooftop model was evaluated at; raise it to cut false alarms.
+    ROOFTOP_CONF_THRESHOLD: float = float(os.getenv("ROOFTOP_CONF_THRESHOLD", "0.25"))
 
     # Automated monitoring
     MONITORING_ENABLED: bool = os.getenv("MONITORING_ENABLED", "true").lower() in ("true", "1", "yes")

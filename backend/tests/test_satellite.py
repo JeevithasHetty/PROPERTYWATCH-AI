@@ -82,3 +82,24 @@ def test_status_is_truthful(client, auth):
     assert "DEMO ONLY" in s["satellite_service"]["status"]
     assert s["satellite_service"]["copernicus_configured"] is False
     assert "LEVIR-CD-Building-v2" in s["ai_models_registry"]["unavailable_models"]
+
+
+def test_retrieve_restores_snapshot_whose_file_is_missing(client, auth, live_mode):
+    from pathlib import Path
+    satellite_service.copernicus._token = None
+    with patch.object(settings, "COPERNICUS_CLIENT_ID", "id"), patch.object(settings, "COPERNICUS_CLIENT_SECRET", "secret"), \
+         patch("app.services.satellite_service.requests.post", side_effect=_fake_post):
+        pid = _prop_id(client, auth)
+        body = {"property_id": pid, "catalog_id": "S2A_B", "acquisition_date": "2026-09-14",
+                "satellite_name": "S2A", "cloud_coverage": 1.0}
+        r = client.post("/api/satellite/retrieve", json=body, headers=auth["admin"])
+        assert r.status_code == 200, r.text
+        sid, first = r.json()["id"], r.json()["image_path"]
+        # still on disk -> duplicate is refused
+        assert client.post("/api/satellite/retrieve", json=body, headers=auth["admin"]).status_code == 409
+        # file disappears -> the same call restores it instead of failing
+        (settings.SNAPSHOTS_DIR / Path(first).name).unlink()
+        r = client.post("/api/satellite/retrieve", json=body, headers=auth["admin"])
+        assert r.status_code == 200, r.text
+        assert r.json()["id"] == sid and r.json()["image_path"] != first
+        assert (settings.SNAPSHOTS_DIR / Path(r.json()["image_path"]).name).exists()

@@ -22,10 +22,10 @@ const SettingsPage = () => {
   const [toggling, setToggling] = useState(false);
   const [message, setMessage] = useState(null);
 
-  const fetchStatus = async () => {
+  const fetchStatus = async (probe = false) => {
     try {
       setLoading(true);
-      const res = await apiClient.getSettingsStatus();
+      const res = await apiClient.getSettingsStatus(probe === true);
       setStatusData(res.data);
     } catch (err) {
       console.error('Failed to load settings status', err);
@@ -72,7 +72,7 @@ const SettingsPage = () => {
           </p>
         </div>
 
-        <button onClick={fetchStatus} className="btn btn-secondary">
+        <button onClick={() => fetchStatus(true)} className="btn btn-secondary">
           <RefreshCw size={15} />
           <span>Check services again</span>
         </button>
@@ -145,6 +145,7 @@ const SettingsPage = () => {
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.82rem' }}>
             <div><b>Active provider:</b> {statusData.satellite_service.active_provider || 'none'}</div>
             <div><b>Copernicus credentials:</b> {statusData.satellite_service.copernicus_configured ? 'configured' : 'missing (COPERNICUS_CLIENT_ID / SECRET)'}</div>
+            {statusData.satellite_service.probe && <div><b>Live login test:</b> {statusData.satellite_service.probe}</div>}
             <div><b>Google Earth Engine:</b> {statusData.satellite_service.gee_configured ? 'configured' : `missing: ${(statusData.satellite_service.gee_missing || []).join(', ')}`}</div>
             <div><b>Dataset:</b> {statusData.satellite_service.dataset}</div>
             <div><b>Resolution:</b> {statusData.satellite_service.resolution}</div>
@@ -170,6 +171,31 @@ const SettingsPage = () => {
             <div><b>Visual Heatmaps:</b> {statusData.authenticity_service.forensic_heatmaps || 'Automated Turbo Overlays'}</div>
           </div>
         </div>
+
+        {/* ONNX detection models */}
+        {statusData.ai_models_registry && (
+        <div className="glass-panel" style={{ padding: '22px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Sparkles size={18} color="#38bdf8" />
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 700 }}>Detection models (ONNX)</h4>
+            </div>
+            <span className={`badge ${statusData.ai_models_registry.status === 'OPERATIONAL' ? 'badge-green' : 'badge-cyan'}`}>
+              {statusData.ai_models_registry.status}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.82rem' }}>
+            {Object.entries(statusData.ai_models_registry.models || {}).map(([name, m]) => (
+              <div key={name}>
+                <b>{name}:</b> {m.available ? 'available' : 'NOT available'}
+                <div style={{ color: 'var(--text-muted)', wordBreak: 'break-all' }}>{m.detail}</div>
+              </div>
+            ))}
+            {statusData.ai_models_registry.rooftop_classes && <div><b>Rooftop classes:</b> {statusData.ai_models_registry.rooftop_classes}</div>}
+            <div style={{ color: 'var(--text-muted)' }}>If a model is not available, no result is produced. Nothing is guessed.</div>
+          </div>
+        </div>
+        )}
 
         {/* LLM Evidence Summarizer */}
         <div className="glass-panel" style={{ padding: '22px' }}>

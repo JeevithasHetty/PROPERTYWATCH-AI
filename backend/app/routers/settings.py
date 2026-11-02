@@ -129,6 +129,18 @@ def get_service_status(
         "unavailable_models": {m.model_key: m.provider for m in models if not m.is_available},
         "fabrication_policy": "Strict (no prediction is generated when weights are missing)",
     }
+    try:  # live check of the two ONNX weight files, with the reason when one cannot be used
+        from app.services.ai_models_service import _levir_runner, _rooftop_runner
+        detail = {}
+        for label, runner in (("Building change detector (levir_cd.onnx)", _levir_runner),
+                              ("Rooftop object detector (rooftop_yolo.onnx)", _rooftop_runner)):
+            ok, why = runner.check()
+            detail[label] = {"available": ok, "detail": "loaded: " + runner.path if ok else why}
+        models_registry_status["models"] = detail
+        models_registry_status["status"] = "OPERATIONAL" if all(v["available"] for v in detail.values()) else "PARTIAL"
+        models_registry_status["rooftop_classes"] = settings.ROOFTOP_MODEL_CLASSES
+    except Exception as exc:  # noqa: BLE001
+        models_registry_status["models"] = {"ONNX check": {"available": False, "detail": str(exc)}}
 
     return {
         "geocoding": geocoding_status,
