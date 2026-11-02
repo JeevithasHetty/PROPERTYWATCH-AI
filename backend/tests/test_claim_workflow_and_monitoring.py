@@ -198,3 +198,48 @@ def test_live_mode_has_no_demo_users_unless_bootstrapped(tmp_path, monkeypatch):
     db = SL()
     assert db.query(User).count() == n
     db.close()
+
+
+def test_auto_compare_fetches_baseline_and_latest_then_compares(client, auth, live_mode):
+    from unittest.mock import patch, MagicMock
+    from tests.conftest import png_bytes
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import Property, PropertySnapshot
+    from app.services.satellite_service import satellite_service
+
+    db = SessionLocal()
+    try:
+        prop = db.query(Property).order_by(Property.id.desc()).first()
+        pid = prop.id
+        db.query(PropertySnapshot).filter(PropertySnapshot.property_id == pid).delete()
+        db.commit()
+    finally:
+        db.close()
+
+    searches = []
+
+    def fake_post(url, **kw):
+        m = MagicMock()
+        if "openid-connect/token" in url:
+            m.status_code, m.json.return_value = 200, {"access_token": "tok", "expires_in": 600}
+        elif url.endswith("/search"):
+            searches.append(1)
+            when = "2026-03-10" if len(searches) == 1 else "2026-10-20"
+            m.status_code = 200
+            m.json.return_value = {"features": [{"id": f"S2_{len(searches)}", "properties": {
+                "datetime": f"{when}T05:30:00Z", "eo:cloud_cover": 2.0, "platform": "sentinel-2a"}}]}
+        else:
+            m.status_code, m.content = 200, png_bytes(noise=True, size=256)
+        return m
+
+    satellite_service.copernicus._token = None
+    with patch.object(settings, "COPERNICUS_CLIENT_ID", "id"), patch.object(settings, "COPERNICUS_CLIENT_SECRET", "s"), \
+         patch("app.services.satellite_service.requests.post", side_effect=fake_post):
+        r = client.post("/api/monitoring/auto-compare", json={"property_id": pid}, headers=auth["admin"])
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["baseline_created"] is True
+    assert body["baseline_snapshot_id"] != body["comparison_snapshot_id"]
+    assert "circled_regions" in body and body["building_change_model"]["status"] in ("UNAVAILABLE", "COMPLETED")
+    assert "Sentinel-2" in body["model_note"]

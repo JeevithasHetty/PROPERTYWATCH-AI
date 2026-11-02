@@ -338,6 +338,7 @@ const ImageComparisonPage = () => {
               beforeImage={selectedBaseSnap.image_path}
               afterImage={selectedCompSnap.image_path}
               heatmapImage={analysisResult?.heatmap_image_path}
+              circledImage={analysisResult?.diff_image_path}
               beforeLabel={`Earlier photo · ${new Date(selectedBaseSnap.acquisition_date).toLocaleDateString()}`}
               afterLabel={`Later photo · ${new Date(selectedCompSnap.acquisition_date).toLocaleDateString()}`}
               heatmapLabel="Highlighted differences"
