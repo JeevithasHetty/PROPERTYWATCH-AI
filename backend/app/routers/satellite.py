@@ -12,6 +12,7 @@ from app.services.satellite_service import (
     satellite_service, SatelliteUnavailableError, SatelliteProviderError, ORIGIN_DEMO
 )
 from app.auth import get_current_user
+from app.services.paths import snapshot_fs_path
 
 router = APIRouter(prefix="/satellite", tags=["Satellite Monitoring"])
 
@@ -90,7 +91,12 @@ def retrieve_satellite_snapshot(
         PropertySnapshot.acquisition_date == acq_dt
     ).first()
 
-    if existing_snapshot:
+    repair = None
+    if existing_snapshot and existing_snapshot.data_origin in ("SATELLITE_LIVE", "DEMO_SYNTHETIC") \
+            and not snapshot_fs_path(existing_snapshot).exists():
+        # The record exists but its image file is gone from disk: download it again and fix the record.
+        repair = existing_snapshot
+    elif existing_snapshot:
         raise HTTPException(
             status_code=409,
             detail=f"A snapshot for date {req.acquisition_date} already exists for this property (Snapshot ID: {existing_snapshot.id})."
@@ -122,20 +128,31 @@ def retrieve_satellite_snapshot(
     except SatelliteProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc))
 
-    snapshot = PropertySnapshot(
-        property_id=prop.id,
-        image_path=retrieval_res["image_path"],
-        image_source=retrieval_res["image_source"],
-        acquisition_date=retrieval_res["acquisition_date"],
-        cloud_coverage=req.cloud_coverage or retrieval_res["cloud_coverage"],
-        is_baseline=req.is_baseline,
-        data_origin=retrieval_res["data_origin"],
-        capture_metadata=retrieval_res["capture_metadata"]
-    )
-    db.add(snapshot)
+    if repair:
+        snapshot = repair
+        old_path = snapshot.image_path
+        snapshot.image_path = retrieval_res["image_path"]
+        snapshot.image_source = retrieval_res["image_source"]
+        snapshot.cloud_coverage = req.cloud_coverage or retrieval_res["cloud_coverage"]
+        snapshot.data_origin = retrieval_res["data_origin"]
+        snapshot.capture_metadata = retrieval_res["capture_metadata"]
+        if prop.baseline_image_url == old_path:
+            prop.baseline_image_url = retrieval_res["image_path"]
+    else:
+        snapshot = PropertySnapshot(
+            property_id=prop.id,
+            image_path=retrieval_res["image_path"],
+            image_source=retrieval_res["image_source"],
+            acquisition_date=retrieval_res["acquisition_date"],
+            cloud_coverage=req.cloud_coverage or retrieval_res["cloud_coverage"],
+            is_baseline=req.is_baseline,
+            data_origin=retrieval_res["data_origin"],
+            capture_metadata=retrieval_res["capture_metadata"]
+        )
+        db.add(snapshot)
 
     # If this is set as baseline or no baseline exists yet, set baseline
-    if req.is_baseline or not prop.baseline_image_url:
+    if (req.is_baseline and not repair) or not prop.baseline_image_url:
         prop.baseline_image_url = retrieval_res["image_path"]
 
     prop.last_monitoring_date = datetime.datetime.utcnow()
@@ -147,7 +164,7 @@ def retrieve_satellite_snapshot(
         user_id=current_user.id,
         entity_type="PropertySnapshot",
         entity_id=str(snapshot.id),
-        action="SATELLITE_SNAPSHOT_RETRIEVED",
+        action="SATELLITE_SNAPSHOT_REPAIRED" if repair else "SATELLITE_SNAPSHOT_RETRIEVED",
         new_state={
             "property_id": prop.id,
             "acquisition_date": req.acquisition_date,

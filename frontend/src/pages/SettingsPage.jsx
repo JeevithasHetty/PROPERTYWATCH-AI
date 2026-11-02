@@ -172,6 +172,31 @@ const SettingsPage = () => {
           </div>
         </div>
 
+        {/* ONNX detection models */}
+        {statusData.ai_models_registry && (
+        <div className="glass-panel" style={{ padding: '22px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Sparkles size={18} color="#38bdf8" />
+              <h4 style={{ fontSize: '0.95rem', fontWeight: 700 }}>Detection models (ONNX)</h4>
+            </div>
+            <span className={`badge ${statusData.ai_models_registry.status === 'OPERATIONAL' ? 'badge-green' : 'badge-cyan'}`}>
+              {statusData.ai_models_registry.status}
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.82rem' }}>
+            {Object.entries(statusData.ai_models_registry.models || {}).map(([name, m]) => (
+              <div key={name}>
+                <b>{name}:</b> {m.available ? 'available' : 'NOT available'}
+                <div style={{ color: 'var(--text-muted)', wordBreak: 'break-all' }}>{m.detail}</div>
+              </div>
+            ))}
+            {statusData.ai_models_registry.rooftop_classes && <div><b>Rooftop classes:</b> {statusData.ai_models_registry.rooftop_classes}</div>}
+            <div style={{ color: 'var(--text-muted)' }}>If a model is not available, no result is produced. Nothing is guessed.</div>
+          </div>
+        </div>
+        )}
+
         {/* LLM Evidence Summarizer */}
         <div className="glass-panel" style={{ padding: '22px' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>

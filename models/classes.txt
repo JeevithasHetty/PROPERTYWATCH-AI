@@ -1,0 +1,2 @@
+0: solar_panel
+1: pool

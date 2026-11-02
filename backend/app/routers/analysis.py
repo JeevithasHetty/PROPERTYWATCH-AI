@@ -57,9 +57,13 @@ def compare_property_images(
     )
 
     if not base_path.exists():
-        raise HTTPException(status_code=400, detail=f"Baseline image file missing on disk: {base_path}")
+        raise HTTPException(status_code=400, detail=(f"The earlier photo (snapshot {base_snap.id}, {base_snap.acquisition_date:%d/%m/%Y}) is no longer on the server. "
+                    "Open Satellite Monitoring and retrieve that date again to restore it. "
+                    f"Expected file: {base_path.name}"))
     if not comp_path.exists():
-        raise HTTPException(status_code=400, detail=f"Comparison image file missing on disk: {comp_path}")
+        raise HTTPException(status_code=400, detail=(f"The later photo (snapshot {comp_snap.id}, {comp_snap.acquisition_date:%d/%m/%Y}) is no longer on the server. "
+                    "Open Satellite Monitoring and retrieve that date again to restore it. "
+                    f"Expected file: {comp_path.name}"))
 
     try:
         cv_result = run_image_comparison_pipeline(
