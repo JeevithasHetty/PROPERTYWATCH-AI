@@ -92,6 +92,26 @@ def compute_ssim_diff(im1_gray: np.ndarray, im2_gray: np.ndarray) -> Tuple[np.nd
     diff_map = ((1.0 - ssim_map) * 127.5).clip(0, 255).astype(np.uint8)
     return diff_map, mean_ssim
 
+def _match_sharpness(a: np.ndarray, b: np.ndarray, max_sigma: float = 8.0):
+    """Blur whichever image is sharper (Laplacian variance) until both have similar detail."""
+    def sharp(img):
+        return float(cv2.Laplacian(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+    sa, sb = sharp(a), sharp(b)
+    if min(sa, sb) <= 0 or max(sa, sb) / min(sa, sb) < 1.5:
+        return a, b, "Both photos have similar sharpness."
+    sharper_is_a = sa > sb
+    target = min(sa, sb)
+    src = a if sharper_is_a else b
+    out, sigma = src, 0.0
+    while sigma < max_sigma:
+        sigma += 0.5
+        out = cv2.GaussianBlur(src, (0, 0), sigma)
+        if sharp(out) <= target * 1.2:
+            break
+    note = f"One photo was sharper than the other; it was softened (sigma {sigma:.1f}) so only real differences show."
+    return (out, b, note) if sharper_is_a else (a, out, note)
+
+
 def run_image_comparison_pipeline(
     baseline_path: str,
     comparison_path: str,
@@ -114,8 +134,16 @@ def run_image_comparison_pipeline(
 
     # Standardize dimensions (standard 800x800 for high resolution inspection)
     target_size = (800, 800)
-    base_resized = cv2.resize(base_img, target_size, interpolation=cv2.INTER_AREA)
-    comp_resized = cv2.resize(comp_img, target_size, interpolation=cv2.INTER_AREA)
+    # Compare like with like: if one photo has far less real detail than the other (e.g. a 10 m satellite tile
+    # against a sharp photo), first reduce the sharper one to the coarser one's native resolution. Otherwise
+    # every edge in the sharp photo shows up as a false "change".
+    native = min(min(base_img.shape[:2]), min(comp_img.shape[:2]))
+    if native < 800:
+        base_img = cv2.resize(base_img, (native, native), interpolation=cv2.INTER_AREA)
+        comp_img = cv2.resize(comp_img, (native, native), interpolation=cv2.INTER_AREA)
+    base_resized = cv2.resize(base_img, target_size, interpolation=cv2.INTER_AREA if native >= 800 else cv2.INTER_CUBIC)
+    comp_resized = cv2.resize(comp_img, target_size, interpolation=cv2.INTER_AREA if native >= 800 else cv2.INTER_CUBIC)
+    base_resized, comp_resized, sharpness_note = _match_sharpness(base_resized, comp_resized)
 
     # 2. Attempt feature alignment
     aligned_comp, alignment_ok, alignment_msg = align_images_orb(base_resized, comp_resized)
@@ -161,19 +189,15 @@ def run_image_comparison_pipeline(
         if area > 450: # filter out minor sensor noise
             significant_contours.append(cnt)
             changed_area += area
-            x, y, w, h = cv2.boundingRect(cnt)
-            # Draw glowing bounding box
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 69, 255), 2) # Crimson Orange
-            cv2.putText(
-                annotated,
-                f"Mod: {int(area)}px",
-                (x, max(20, y - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (0, 69, 255),
-                1,
-                cv2.LINE_AA
-            )
+            (cx, cy), radius = cv2.minEnclosingCircle(cnt)
+            circle_no = len(significant_contours)
+            # Circle the change (white outline under a red ring so it shows on any background)
+            cv2.circle(annotated, (int(cx), int(cy)), int(radius) + 10, (255, 255, 255), 5, cv2.LINE_AA)
+            cv2.circle(annotated, (int(cx), int(cy)), int(radius) + 10, (0, 0, 230), 3, cv2.LINE_AA)
+            cv2.putText(annotated, str(circle_no), (int(cx) - 6, max(20, int(cy - radius) - 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 4, cv2.LINE_AA)
+            cv2.putText(annotated, str(circle_no), (int(cx) - 6, max(20, int(cy - radius) - 18)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 230), 2, cv2.LINE_AA)
 
     changed_percentage = min(100.0, round((changed_area / total_area) * 100.0, 2))
     # Normalized change score (scaling SSIM loss and pixel ratio)
@@ -240,5 +264,6 @@ def run_image_comparison_pipeline(
         "explanation": explanation,
         "limitations": limitations,
         "alignment_status": alignment_msg,
+        "sharpness_matching": sharpness_note,
         "mean_ssim": round(mean_ssim, 4)
     }

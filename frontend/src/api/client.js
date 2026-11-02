@@ -130,6 +130,7 @@ export const apiClient = {
   getSatelliteStatus: () => api.get('/satellite/status'),
   getMonitoringStatus: () => api.get('/monitoring/status'),
   getMonitoringRuns: (params) => api.get('/monitoring/runs', { params }),
+  autoCompare: (propertyId) => api.post('/monitoring/auto-compare', { property_id: propertyId }),
   runMonitoring: (propertyIds) => api.post('/monitoring/run', { property_ids: propertyIds || null }),
 
   // Notifications

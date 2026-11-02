@@ -73,6 +73,30 @@ def _notify(db: Session, prop: Property, mod: Modification, score: float):
         send_email(u.email, title, msg)
 
 
+def _auto_baseline(db: Session, prop: Property) -> PropertySnapshot:
+    """No baseline yet: fetch one automatically (clearest pass 2-7 months ago, else up to 13 months ago)."""
+    today = datetime.date.today()
+    for far, near in ((210, 60), (400, 60)):
+        found = satellite_service.search_imagery(prop.latitude, prop.longitude,
+                                                 (today - datetime.timedelta(days=far)).isoformat(),
+                                                 (today - datetime.timedelta(days=near)).isoformat(),
+                                                 settings.MONITORING_MAX_CLOUD_COVER)
+        if found:
+            best = min(found, key=lambda r: (r["cloud_coverage"], r["acquisition_date"]))
+            hint = "baseline"
+            got = satellite_service.retrieve_imagery(best["catalog_id"], best["acquisition_date"], best["satellite_name"],
+                                                     prop.latitude, prop.longitude, hint, best["cloud_coverage"])
+            snap = PropertySnapshot(property_id=prop.id, image_path=got["image_path"], image_source=got["image_source"],
+                                    acquisition_date=got["acquisition_date"], cloud_coverage=got["cloud_coverage"],
+                                    is_baseline=True, capture_metadata=got["capture_metadata"], data_origin=got["data_origin"])
+            db.add(snap)
+            prop.baseline_image_url = got["image_path"]
+            db.flush()
+            return snap
+    raise RuntimeError("No cloud-free satellite pass was found for the baseline period. "
+                       "Raise MONITORING_MAX_CLOUD_COVER (for example 40) and try again.")
+
+
 def check_property(db: Session, prop: Property) -> Dict[str, Any]:
     """Run one monitoring check; always records a MonitoringRun row."""
     run = MonitoringRun(property_id=prop.id, status="Completed", model_used="OpenCV Differencing")
@@ -82,7 +106,8 @@ def check_property(db: Session, prop: Property) -> Dict[str, Any]:
         last = (db.query(PropertySnapshot).filter(PropertySnapshot.property_id == prop.id)
                 .order_by(desc(PropertySnapshot.acquisition_date)).first())
         if last is None:
-            raise RuntimeError("No baseline snapshot exists; retrieve a baseline first.")
+            last = _auto_baseline(db, prop)
+            out["baseline_created"] = True
         start = (last.acquisition_date + datetime.timedelta(days=1)).date()
         end = datetime.date.today()
         if start > end:
@@ -93,7 +118,7 @@ def check_property(db: Session, prop: Property) -> Dict[str, Any]:
             if not found:
                 run.status, run.summary = "Inconclusive", "No new cloud-free imagery available yet."
             else:
-                best = min(found, key=lambda r: (r["cloud_coverage"], r["acquisition_date"]))
+                best = max(found, key=lambda r: r["acquisition_date"])  # newest pass that meets the cloud limit
                 if db.query(PropertySnapshot).filter(
                         PropertySnapshot.property_id == prop.id,
                         PropertySnapshot.acquisition_date == datetime.datetime.strptime(best["acquisition_date"], "%Y-%m-%d")).first():
@@ -121,6 +146,9 @@ def check_property(db: Session, prop: Property) -> Dict[str, Any]:
                     db.flush()
                     run.change_score = cv["change_score"]
                     run.baseline_asset_id = None
+                    out.update({"baseline_snapshot_id": last.id, "comparison_snapshot_id": snap.id,
+                                "analysis_id": analysis.id, "change_score": cv["change_score"],
+                                "circled_regions": cv["contours_count"]})
                     if cv["change_score"] >= settings.MONITORING_ALERT_CHANGE_SCORE:
                         mod = Modification(
                             modification_alert_id=_next_alert_id(db), property_id=prop.id, analysis_id=analysis.id,

@@ -6,6 +6,7 @@ const ImageSlider = ({
   beforeImage,
   afterImage,
   heatmapImage,
+  circledImage,
   beforeLabel = 'Baseline Image',
   afterLabel = 'Newer Snapshot',
   heatmapLabel = 'Highlighted differences'
@@ -14,10 +15,13 @@ const ImageSlider = ({
   const [isDragging, setIsDragging] = useState(false);
   const [viewMode, setViewMode] = useState('split'); // 'split' or 'side-by-side'
   const [showHeatmap, setShowHeatmap] = useState(false);
+  const [showCircles, setShowCircles] = useState(false);
   const containerRef = useRef(null);
 
-  const activeAfterImage = showHeatmap && heatmapImage ? heatmapImage : afterImage;
-  const activeAfterLabel = showHeatmap && heatmapImage ? heatmapLabel : afterLabel;
+  const activeAfterImage = showCircles && circledImage ? circledImage
+    : showHeatmap && heatmapImage ? heatmapImage : afterImage;
+  const activeAfterLabel = showCircles && circledImage ? 'Later photo with changes circled'
+    : showHeatmap && heatmapImage ? heatmapLabel : afterLabel;
 
   const handleMouseDown = () => setIsDragging(true);
   const handleMouseMove = (e) => {
@@ -66,9 +70,19 @@ const ImageSlider = ({
           </button>
         </div>
 
+        {circledImage && (
+          <button
+            onClick={() => { setShowCircles(!showCircles); setShowHeatmap(false); }}
+            className={`btn btn-sm ${showCircles ? 'btn-primary' : 'btn-secondary'}`}
+          >
+            <Layers size={14} />
+            <span>{showCircles ? 'Hide circles' : 'Circle the changes'}</span>
+          </button>
+        )}
+
         {heatmapImage && (
           <button
-            onClick={() => setShowHeatmap(!showHeatmap)}
+            onClick={() => { setShowHeatmap(!showHeatmap); setShowCircles(false); }}
             className={`btn btn-sm ${showHeatmap ? 'btn-primary' : 'btn-secondary'}`}
             style={{ background: showHeatmap ? 'linear-gradient(135deg, #d97706 0%, #b45309 100%)' : undefined }}
           >

@@ -33,6 +33,8 @@ const SatelliteMonitoringPage = () => {
   const [snapshots, setSnapshots] = useState([]);
   const [searching, setSearching] = useState(false);
   const [retrievingId, setRetrievingId] = useState(null);
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [autoResult, setAutoResult] = useState(null);
   const [message, setMessage] = useState(null);
   const [error, setError] = useState(null);
 
@@ -99,6 +101,23 @@ const SatelliteMonitoringPage = () => {
       setError(err.response?.data?.detail || 'Could not search for property photos.');
     } finally {
       setSearching(false);
+    }
+  };
+
+  const handleAutoCompare = async () => {
+    if (!selectedProperty) return;
+    setError(null); setMessage(null); setAutoResult(null);
+    setAutoRunning(true);
+    try {
+      const res = await apiClient.autoCompare(selectedProperty.id);
+      setAutoResult(res.data);
+      setMessage(res.data.message || 'Automatic check finished.');
+      const updatedProp = await apiClient.getProperty(selectedProperty.id);
+      setSnapshots(updatedProp.data.snapshots || []);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Automatic check failed.');
+    } finally {
+      setAutoRunning(false);
     }
   };
 
@@ -169,6 +188,37 @@ const SatelliteMonitoringPage = () => {
           <span>{message}</span>
         </div>
       )}
+
+      {/* Automatic mode */}
+      <div className="glass-panel" style={{ padding: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px', flexWrap: 'wrap' }}>
+          <div>
+            <h3 style={{ fontSize: '1.05rem', fontWeight: 700 }}>Fetch photos and compare automatically</h3>
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', maxWidth: '640px' }}>
+              The app picks an earlier satellite photo as the baseline (if none is saved), fetches the newest clear photo,
+              compares them and circles what changed. No dates to choose.
+            </p>
+          </div>
+          <button className="btn btn-primary" onClick={handleAutoCompare} disabled={autoRunning || !selectedProperty}>
+            <Layers size={16} />
+            <span>{autoRunning ? 'Working...' : 'Fetch and compare now'}</span>
+          </button>
+        </div>
+        {autoResult && autoResult.comparison_snapshot_id && (
+          <div style={{ fontSize: '0.86rem', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            <div><b>Visual difference score:</b> {autoResult.change_score}% &nbsp; <b>Circled areas:</b> {autoResult.circled_regions}</div>
+            {autoResult.building_change_model && (
+              <div><b>Building-change model:</b> {autoResult.building_change_model.status === 'COMPLETED'
+                ? autoResult.building_change_model.summary : `not available (${autoResult.building_change_model.summary || autoResult.building_change_model.status})`}</div>
+            )}
+            {autoResult.model_note && <div style={{ color: 'var(--text-muted)' }}>{autoResult.model_note}</div>}
+            <Link className="btn btn-secondary" style={{ alignSelf: 'flex-start' }}
+              to={`/analysis?property_id=${selectedProperty.id}&base=${autoResult.baseline_snapshot_id}&comp=${autoResult.comparison_snapshot_id}`}>
+              <ArrowRight size={16} /><span>Open comparison with circled changes</span>
+            </Link>
+          </div>
+        )}
+      </div>
 
       {/* Query Bar */}
       <div className="glass-panel" style={{ padding: '24px' }}>
